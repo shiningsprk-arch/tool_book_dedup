@@ -127,6 +127,25 @@ def validate_source():
     return manifest, errors
 
 
+def check_line_endings():
+    """检出 CRLF 字节。
+
+    这不是洁癖：`.gitattributes` 让仓库里存的是 LF，而 git 只在检出时才改写工作区文件——
+    如果文件是在 `.gitattributes` 生效**之前**写下的，工作区就是 CRLF、仓库里是 LF，
+    于是"本地打的包"与"从远端 clone 打的包"字节不同（曾实测差 550 字节：
+    ce6b0edc… vs 644c5dc8…）。所以构建前先验一遍，而不是等用户拿两个 sha256 来对。
+    """
+    offenders = []
+    for relative, disk in iter_payload():
+        if relative.endswith(('.png', '.zip', '.jpg', '.woff', '.woff2')):
+            continue
+        with open(disk, 'rb') as handle:
+            data = handle.read()
+        if b'\r\n' in data:
+            offenders.append('%s（%d 处）' % (relative, data.count(b'\r\n')))
+    return offenders
+
+
 def iter_payload():
     """产出 (归档内路径, 磁盘路径)。"""
     for name in sorted(os.listdir(REPO_ROOT)):
@@ -153,6 +172,10 @@ def iter_payload():
 
 def build(out_dir, keep=False):
     manifest, errors = validate_source()
+    crlf = check_line_endings()
+    if crlf:
+        errors = list(errors) + [
+            '含 CRLF 行尾（会让产物与 clone 打出的字节不同）：%s' % '、'.join(crlf)]
     if errors:
         for error in errors:
             print('  ✗ %s' % error)
