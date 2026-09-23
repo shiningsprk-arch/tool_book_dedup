@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>查重合并</title>
+  <link rel="stylesheet" href="lib/theme.css?v=0.1.0">
+  <link rel="stylesheet" href="lib/book_dedup.css?v=0.1.0">
+</head>
+<body>
+  <noscript>本工具需要 JavaScript。</noscript>
+
+  <main class="bd-wrap" id="app">
+    <section class="bd-card">
+      <h2 class="bd-card-title" data-i18n="scope.title">查重范围</h2>
+      <p class="bd-hint" id="scope-hint" data-i18n="scope.loading">正在读取书库信息…</p>
+      <div class="bd-row">
+        <label class="bd-field">
+          <span data-i18n="scope.threshold">相似度阈值</span>
+          <input id="threshold" type="number" min="50" max="100" step="1" value="85">
+        </label>
+        <div class="bd-field bd-field-wide">
+          <span data-i18n="scope.note">说明</span>
+          <p class="bd-hint" data-i18n="scope.thresholdHint">
+            越高越保守（只报几乎一样的），越低越能查出改过书名的重复，但误报也更多。
+          </p>
+        </div>
+      </div>
+      <div class="bd-actions">
+        <button id="btn-scan" class="bd-btn bd-btn-primary" data-i18n="scope.start">开始查重</button>
+        <button id="btn-cancel" class="bd-btn" hidden data-i18n="scope.cancel">取消</button>
+      </div>
+    </section>
+
+    <section class="bd-card" id="run-card" hidden>
+      <div class="bd-run-head">
+        <span id="run-label" class="bd-run-label"></span>
+        <span id="run-count" class="bd-hint"></span>
+      </div>
+      <div class="bd-progress"><div class="bd-progress-bar" id="run-bar"></div></div>
+      <p class="bd-hint" id="run-detail"></p>
+    </section>
+
+    <section class="bd-card" id="summary-card" hidden>
+      <h2 class="bd-card-title" data-i18n="summary.title">查重结果</h2>
+      <div class="bd-summary" id="summary"></div>
+      <div class="bd-row bd-filters">
+        <label class="bd-field">
+          <span data-i18n="filter.confidence">证据强度</span>
+          <select id="filter-confidence">
+            <option value="" data-i18n="filter.all">全部</option>
+            <option value="strong" data-i18n="confidence.strong">确定</option>
+            <option value="likely" data-i18n="confidence.likely">很可能</option>
+            <option value="weak" data-i18n="confidence.weak">存疑</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span data-i18n="filter.keyword">关键字</span>
+          <input id="filter-keyword" type="search" data-i18n-attr="placeholder:filter.keywordPlaceholder">
+        </label>
+      </div>
+      <p class="bd-hint" id="list-meta"></p>
+      <div id="groups" class="bd-groups"></div>
+      <div class="bd-pager" id="pager" hidden>
+        <button id="btn-prev" class="bd-btn" data-i18n="pager.prev">上一页</button>
+        <span id="pager-label" class="bd-hint"></span>
+        <button id="btn-next" class="bd-btn" data-i18n="pager.next">下一页</button>
+      </div>
+      <p class="bd-empty" id="empty-state" hidden></p>
+    </section>
+
+    <section class="bd-card" id="handled-card" hidden>
+      <h2 class="bd-card-title" data-i18n="handled.title">本次已处理</h2>
+      <ul class="bd-handled" id="handled-list"></ul>
+    </section>
+
+    <p class="bd-hint bd-credit" data-i18n="app.footer">
+      查重判定为 clean-room 实现，设计思路参考 BookOrbit（AGPL-3.0）。
+    </p>
+  </main>
+
+  <!-- 对照台 -->
+  <div class="bd-overlay" id="bench-overlay" hidden>
+    <div class="bd-sheet" role="dialog" aria-modal="true">
+      <header class="bd-sheet-head">
+        <h2 id="bench-title" data-i18n="bench.title">重复项对照</h2>
+        <button id="bench-close" class="bd-btn bd-btn-icon" aria-label="close">✕</button>
+      </header>
+      <div class="bd-sheet-body" id="bench-body"></div>
+      <footer class="bd-sheet-foot">
+        <div class="bd-foot-actions">
+          <button id="btn-merge" class="bd-btn bd-btn-primary" data-i18n="bench.merge">合并到选中项</button>
+          <button id="btn-preview" class="bd-btn" data-i18n="bench.preview">先看合并预览</button>
+        </div>
+        <p class="bd-hint" id="bench-hint"></p>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 合并预览 / 确认 -->
+  <div class="bd-overlay" id="plan-overlay" hidden>
+    <div class="bd-sheet" role="dialog" aria-modal="true">
+      <header class="bd-sheet-head">
+        <h2 id="plan-title" data-i18n="plan.title">合并预览</h2>
+        <button id="plan-close" class="bd-btn bd-btn-icon" aria-label="close">✕</button>
+      </header>
+      <div class="bd-sheet-body" id="plan-body"></div>
+      <footer class="bd-sheet-foot">
+        <label class="bd-check">
+          <input type="checkbox" id="delete-source" checked>
+          <span data-i18n="plan.deleteSource">同时删除重复记录（不勾则只合并格式，保留两条记录）</span>
+        </label>
+        <div class="bd-foot-actions">
+          <button id="btn-apply" class="bd-btn bd-btn-primary" data-i18n="plan.apply">确认合并</button>
+          <button id="plan-cancel" class="bd-btn" data-i18n="plan.cancel">取消</button>
+        </div>
+        <p class="bd-hint" id="plan-hint"></p>
+      </footer>
+    </div>
+  </div>
+
+  <div class="bd-toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/static/toolbox-bridge.js"></script>
+  <script src="app.js?v=0.1.0"></script>
+</body>
+</html>

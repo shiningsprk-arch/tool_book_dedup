@@ -1,0 +1,358 @@
+# -*- coding: utf-8 -*-
+"""生成三语 locales —— 文案集中在这里，避免手写 JSON 漏键。
+
+前端用扁平点号键（脚手架 i18n 直查），所以脚本产出就是扁平表；
+`scripts/check_locales.py` 会与前端实际引用的键做对账。
+"""
+import json
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOCALES = os.path.join(HERE, '..', 'frontend', 'locales')
+
+ZH = {
+    'app.title': '查重合并',
+    'app.footer': '查重判定为 clean-room 实现，设计思路参考 BookOrbit（AGPL-3.0）；判定规则与权重按 MyBooks 口径重做。',
+
+    'scope.title': '查重范围',
+    'scope.loading': '正在读取书库信息…',
+    'scope.total': '共 {n} 本书',
+    'scope.threshold': '相似度阈值',
+    'scope.note': '说明',
+    'scope.thresholdHint': '越高越保守（只报几乎一样的），越低越能查出改过书名的重复，但误报也更多。85 是默认值，结果里会显示实际使用的阈值，便于按你自己的书库调整。',
+    'scope.start': '开始查重',
+    'scope.cancel': '取消',
+    'scope.failed': '读取书库信息失败',
+    'scope.restoreFailed': '读取上次结果失败',
+    'scope.startFailed': '启动失败',
+    'scope.thresholdRange': '阈值应在 50~100 之间',
+
+    'run.scanning': '正在查重…',
+    'run.cancelled': '已请求取消',
+    'run.failed': '查重失败',
+    'run.idle': '没有正在进行的任务',
+    'run.restored': '查重完成 · 上次查重结果',
+
+    'phase.queued': '排队中',
+    'phase.load': '正在读取书籍信息',
+    'phase.compare': '正在比对标题与作者',
+    'phase.done': '完成',
+
+    'summary.title': '查重结果',
+    'summary.groups': '重复分组',
+    'summary.extra': '多余副本',
+    'summary.reclaimable': '可回收空间',
+    'summary.waste': '同格式重占',
+
+    'filter.all': '全部',
+    'filter.confidence': '证据强度',
+    'filter.keyword': '关键字',
+    'filter.keywordPlaceholder': '书名或作者',
+
+    'confidence.certain': '完全相同',
+    'confidence.strong': '确定',
+    'confidence.likely': '很可能',
+    'confidence.weak': '存疑',
+
+    'reason.isbn': 'ISBN 相同',
+    'reason.fuzzy': '标题相似',
+    'reason.weak': '仅标题相似',
+    'reason.exact': '元数据完全相同',
+    'reason.hash': '文件完全相同',
+
+    'list.meta': '显示 {shown} / {total} 组 · 生成于 {at}',
+    'list.groupTitle': '{n} 本可能是同一本书',
+    'list.sameFormat': '同格式 {v}',
+    'list.failed': '读取列表失败',
+    'list.emptyClean': '没有发现重复书籍',
+    'list.emptyFiltered': '当前筛选条件下没有结果',
+
+    'pager.prev': '上一页',
+    'pager.next': '下一页',
+
+    'bench.title': '重复项对照',
+    'bench.recommend': '推荐保留：{title}',
+    'bench.id': 'ID {id}',
+    'bench.open': '打开书籍页',
+    'bench.pick': '保留这本',
+    'bench.picked': '已选为保留',
+    'bench.keep': '保留',
+    'bench.merge': '合并到选中项',
+    'bench.preview': '先看合并预览',
+    'bench.hint': '删掉源记录会连带失去它的收藏/在读/阅读进度/评分/书单，请先确认要保留哪一本。工具读不到这些数据，所以这一步必须由你判断。',
+    'bench.failed': '读取分组失败',
+
+    'diff.field': '对比项',
+    'diff.allSame': '两份的元数据与条目属性完全相同',
+
+    'keep.metadata': '元数据最全',
+    'keep.formats': '格式最多',
+    'keep.size': '体积最大',
+    'keep.isbn': '有 ISBN',
+    'keep.oldest': '最早入库',
+    'keep.newest': '最新入库',
+    'keep.added': '按入库时间',
+    'keep.manual': '你手动选择',
+    'keep.protected': '带阅读数据',
+    'keep.multiProtected': '多份都带阅读数据，工具无法替你决定',
+
+    'plan.title': '合并预览',
+    'plan.keep': '保留：{title}',
+    'plan.step': '《{src}》(#{id}) → 并入《{dst}》',
+    'plan.moved': '会复制过去：',
+    'plan.dropped': '会被丢弃：',
+    'plan.none': '无',
+    'plan.movedTotal': '复制格式 {n} 个',
+    'plan.droppedTotal': '丢弃同格式 {n} 个',
+    'plan.reclaim': '可回收 {v}',
+    'plan.warnDrop': '同名格式不会被复制：源书的同名文件会被丢弃，留下的是保留项的那一份。',
+    'plan.warnMigrate': '源记录的收藏/在读/阅读进度/评分/书单不会被迁移（工具箱的删除不清理这些关联数据）。',
+    'plan.deleteSource': '同时删除重复记录（不勾则只合并格式，保留两条记录，之后可自行处理）',
+    'plan.apply': '确认合并',
+    'plan.cancel': '取消',
+    'plan.hint': '请确认后再执行',
+    'plan.applied': '已合并：复制 {m} 个格式，删除 {d} 条重复记录',
+    'plan.applyFailed': '合并失败',
+    'plan.failed': '生成合并预览失败',
+
+    'handled.title': '本次已处理',
+    'handled.item': '《{title}》已并入《{into}》',
+}
+
+EN = {
+    'app.title': 'Duplicate Finder',
+    'app.footer': 'Duplicate detection is a clean-room implementation; the design approach references BookOrbit (AGPL-3.0), with rules and weights redone for MyBooks.',
+
+    'scope.title': 'Scope',
+    'scope.loading': 'Reading library information…',
+    'scope.total': '{n} books in library',
+    'scope.threshold': 'Similarity threshold',
+    'scope.note': 'Note',
+    'scope.thresholdHint': 'Higher is stricter (nearly identical only); lower catches retitled duplicates but also more false positives. 85 is the default, and the value actually used is shown in the report so you can tune it for your own library.',
+    'scope.start': 'Start scan',
+    'scope.cancel': 'Cancel',
+    'scope.failed': 'Could not read library information',
+    'scope.restoreFailed': 'Could not read the previous result',
+    'scope.startFailed': 'Could not start',
+    'scope.thresholdRange': 'Threshold must be between 50 and 100',
+
+    'run.scanning': 'Scanning…',
+    'run.cancelled': 'Cancellation requested',
+    'run.failed': 'Scan failed',
+    'run.idle': 'No task in progress',
+    'run.restored': 'Scan complete · previous result',
+
+    'phase.queued': 'Queued',
+    'phase.load': 'Reading book records',
+    'phase.compare': 'Comparing titles and authors',
+    'phase.done': 'Done',
+
+    'summary.title': 'Result',
+    'summary.groups': 'Duplicate groups',
+    'summary.extra': 'Extra copies',
+    'summary.reclaimable': 'Reclaimable',
+    'summary.waste': 'Same-format overlap',
+
+    'filter.all': 'All',
+    'filter.confidence': 'Confidence',
+    'filter.keyword': 'Keyword',
+    'filter.keywordPlaceholder': 'Title or author',
+
+    'confidence.certain': 'Identical',
+    'confidence.strong': 'Certain',
+    'confidence.likely': 'Likely',
+    'confidence.weak': 'Uncertain',
+
+    'reason.isbn': 'Same ISBN',
+    'reason.fuzzy': 'Similar title',
+    'reason.weak': 'Title only',
+    'reason.exact': 'Identical metadata',
+    'reason.hash': 'Identical file',
+
+    'list.meta': 'Showing {shown} / {total} groups · generated {at}',
+    'list.groupTitle': '{n} copies may be the same book',
+    'list.sameFormat': 'same format {v}',
+    'list.failed': 'Could not read the list',
+    'list.emptyClean': 'No duplicate books found',
+    'list.emptyFiltered': 'No groups match the current filter',
+
+    'pager.prev': 'Previous',
+    'pager.next': 'Next',
+
+    'bench.title': 'Compare copies',
+    'bench.recommend': 'Recommended to keep: {title}',
+    'bench.id': 'ID {id}',
+    'bench.open': 'Open book page',
+    'bench.pick': 'Keep this one',
+    'bench.picked': 'Selected to keep',
+    'bench.keep': 'Keep',
+    'bench.merge': 'Merge into selection',
+    'bench.preview': 'Review merge first',
+    'bench.hint': 'Deleting a source record also loses its favorites, reading status, progress, rating and booklists. Confirm which copy to keep first — the tool cannot read that data, so this call is yours.',
+    'bench.failed': 'Could not read the group',
+
+    'diff.field': 'Field',
+    'diff.allSame': 'Both copies have identical metadata and record attributes',
+
+    'keep.metadata': 'Most complete metadata',
+    'keep.formats': 'Most formats',
+    'keep.size': 'Largest',
+    'keep.isbn': 'Has ISBN',
+    'keep.oldest': 'Added earliest',
+    'keep.newest': 'Added latest',
+    'keep.added': 'By added time',
+    'keep.manual': 'Your choice',
+    'keep.protected': 'Carries reading data',
+    'keep.multiProtected': 'Several copies carry reading data — the tool cannot decide',
+
+    'plan.title': 'Merge preview',
+    'plan.keep': 'Keep: {title}',
+    'plan.step': '《{src}》 (#{id}) → merged into 《{dst}》',
+    'plan.moved': 'Will be copied over: ',
+    'plan.dropped': 'Will be discarded: ',
+    'plan.none': 'none',
+    'plan.movedTotal': '{n} formats copied',
+    'plan.droppedTotal': '{n} same formats discarded',
+    'plan.reclaim': '{v} reclaimable',
+    'plan.warnDrop': 'Same-name formats are not copied: the source copy of those files is discarded and the kept copy wins.',
+    'plan.warnMigrate': 'Favorites, reading status, progress, ratings and booklists of the source record are NOT migrated (the toolbox delete does not clean related data).',
+    'plan.deleteSource': 'Also delete the duplicate record (uncheck to merge formats only and keep both records)',
+    'plan.apply': 'Confirm merge',
+    'plan.cancel': 'Cancel',
+    'plan.hint': 'Please confirm before running',
+    'plan.applied': 'Merged: {m} formats copied, {d} duplicate records deleted',
+    'plan.applyFailed': 'Merge failed',
+    'plan.failed': 'Could not build the merge preview',
+
+    'handled.title': 'Handled in this session',
+    'handled.item': '《{title}》 merged into 《{into}》',
+}
+
+ZH_TW = {
+    'app.title': '查重合併',
+    'app.footer': '查重判定為 clean-room 實作，設計思路參考 BookOrbit（AGPL-3.0）；判定規則與權重依 MyBooks 口徑重做。',
+
+    'scope.title': '查重範圍',
+    'scope.loading': '正在讀取書庫資訊…',
+    'scope.total': '共 {n} 本書',
+    'scope.threshold': '相似度閾值',
+    'scope.note': '說明',
+    'scope.thresholdHint': '越高越保守（只報幾乎一樣的），越低越能查出改過書名的重複，但誤報也更多。85 是預設值，結果裡會顯示實際使用的閾值，方便依自己的書庫調整。',
+    'scope.start': '開始查重',
+    'scope.cancel': '取消',
+    'scope.failed': '讀取書庫資訊失敗',
+    'scope.restoreFailed': '讀取上次結果失敗',
+    'scope.startFailed': '啟動失敗',
+    'scope.thresholdRange': '閾值應在 50~100 之間',
+
+    'run.scanning': '正在查重…',
+    'run.cancelled': '已請求取消',
+    'run.failed': '查重失敗',
+    'run.idle': '沒有正在進行的任務',
+    'run.restored': '查重完成 · 上次查重結果',
+
+    'phase.queued': '排隊中',
+    'phase.load': '正在讀取書籍資訊',
+    'phase.compare': '正在比對標題與作者',
+    'phase.done': '完成',
+
+    'summary.title': '查重結果',
+    'summary.groups': '重複分組',
+    'summary.extra': '多餘副本',
+    'summary.reclaimable': '可回收空間',
+    'summary.waste': '同格式重佔',
+
+    'filter.all': '全部',
+    'filter.confidence': '證據強度',
+    'filter.keyword': '關鍵字',
+    'filter.keywordPlaceholder': '書名或作者',
+
+    'confidence.certain': '完全相同',
+    'confidence.strong': '確定',
+    'confidence.likely': '很可能',
+    'confidence.weak': '存疑',
+
+    'reason.isbn': 'ISBN 相同',
+    'reason.fuzzy': '標題相似',
+    'reason.weak': '僅標題相似',
+    'reason.exact': '後設資料完全相同',
+    'reason.hash': '檔案完全相同',
+
+    'list.meta': '顯示 {shown} / {total} 組 · 產生於 {at}',
+    'list.groupTitle': '{n} 本可能是同一本書',
+    'list.sameFormat': '同格式 {v}',
+    'list.failed': '讀取列表失敗',
+    'list.emptyClean': '沒有發現重複書籍',
+    'list.emptyFiltered': '目前篩選條件下沒有結果',
+
+    'pager.prev': '上一頁',
+    'pager.next': '下一頁',
+
+    'bench.title': '重複項對照',
+    'bench.recommend': '建議保留：{title}',
+    'bench.id': 'ID {id}',
+    'bench.open': '開啟書籍頁',
+    'bench.pick': '保留這本',
+    'bench.picked': '已選為保留',
+    'bench.keep': '保留',
+    'bench.merge': '合併到選取項',
+    'bench.preview': '先看合併預覽',
+    'bench.hint': '刪掉來源記錄會一併失去它的收藏／在讀／閱讀進度／評分／書單，請先確認要保留哪一本。工具讀不到這些資料，所以這一步必須由你判斷。',
+    'bench.failed': '讀取分組失敗',
+
+    'diff.field': '對照項',
+    'diff.allSame': '兩份的後設資料與條目屬性完全相同',
+
+    'keep.metadata': '後設資料最完整',
+    'keep.formats': '格式最多',
+    'keep.size': '體積最大',
+    'keep.isbn': '有 ISBN',
+    'keep.oldest': '最早入庫',
+    'keep.newest': '最新入庫',
+    'keep.added': '依入庫時間',
+    'keep.manual': '你手動選擇',
+    'keep.protected': '帶閱讀資料',
+    'keep.multiProtected': '多份都帶閱讀資料，工具無法替你決定',
+
+    'plan.title': '合併預覽',
+    'plan.keep': '保留：{title}',
+    'plan.step': '《{src}》(#{id}) → 併入《{dst}》',
+    'plan.moved': '會複製過去：',
+    'plan.dropped': '會被丟棄：',
+    'plan.none': '無',
+    'plan.movedTotal': '複製格式 {n} 個',
+    'plan.droppedTotal': '丟棄同格式 {n} 個',
+    'plan.reclaim': '可回收 {v}',
+    'plan.warnDrop': '同名格式不會被複製：來源書的同名檔案會被丟棄，留下的是保留項的那一份。',
+    'plan.warnMigrate': '來源記錄的收藏／在讀／閱讀進度／評分／書單不會被移轉（工具箱的刪除不清理這些關聯資料）。',
+    'plan.deleteSource': '同時刪除重複記錄（不勾則只合併格式，保留兩筆記錄，之後可自行處理）',
+    'plan.apply': '確認合併',
+    'plan.cancel': '取消',
+    'plan.hint': '請確認後再執行',
+    'plan.applied': '已合併：複製 {m} 個格式，刪除 {d} 筆重複記錄',
+    'plan.applyFailed': '合併失敗',
+    'plan.failed': '產生合併預覽失敗',
+
+    'handled.title': '本次已處理',
+    'handled.item': '《{title}》已併入《{into}》',
+}
+
+
+def main():
+    os.makedirs(LOCALES, exist_ok=True)
+    payloads = {'zh': ZH, 'en': EN, 'zh-TW': ZH_TW}
+    base = set(ZH)
+    for code, table in payloads.items():
+        missing = base - set(table)
+        extra = set(table) - base
+        if missing or extra:
+            raise SystemExit('%s 键不一致：缺 %s / 多 %s' % (code, sorted(missing), sorted(extra)))
+        path = os.path.join(LOCALES, code + '.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(table, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write('\n')
+        print('wrote %s (%d keys)' % (os.path.relpath(path, HERE), len(table)))
+
+
+if __name__ == '__main__':
+    main()

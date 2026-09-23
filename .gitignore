@@ -1,0 +1,14 @@
+# 打包产物与本地预览：都不入库（产物由 scripts/build.py 从源码重建，可复现）
+dist/
+dev/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,44 @@
+本工具（查重合并 / book_dedup）的判定引擎是**独立实现（clean-room）**，设计思路参考了
+BookOrbit 项目的重复检测模块（https://github.com/bookorbit/bookorbit ，AGPL-3.0-only，
+含 §7 附加条款）。
+
+参考的是**思路与结构**，不是代码。具体地：
+
+借鉴的设计（属于方法/结构层面，不受著作权保护）：
+  · 两档证据分级：ISBN 精确命中强于标题模糊匹配
+  · 匹配理由用枚举表达（`{'code': 'metadata', 'score': 82}`），由界面按语言渲染
+  · 对照表只展开"成员之间有差异"的字段，其余折叠成一句摘要
+  · 保留规则用元组比较（主键相同才看次键），避免"分数打平"的歧义
+  · 误报判断跨扫描存活，重新扫描时先排除已判定过的组合
+
+未使用其任何代码、常量表或数据：
+  · 全部实现为本仓独立编写（见 backend/dedup/ 与 backend/driver.py）
+  · 未复制其 FEATURE_WEIGHTS 权重表、STOPWORDS 停用词表或任何 provider 标识表
+  · 字段集、权重、阈值、媒体家族判定全部按 MyBooks / Calibre 的口径重写
+  · 中文文本处理（字符 bigram、变体判定、尾部注记剥离）为本仓自定，BookOrbit 无对应实现
+
+因此本工具**不引入 AGPL 义务**：它不含 BookOrbit 的代码，也不派生自其代码。
+LICENSE 为本工具的授权（与 MyBooks 宿主一致的 BSD-2-Clause）。
+
+---
+
+The duplicate-detection engine in this tool is an **independent (clean-room) implementation**.
+Its design approach references BookOrbit's duplicate module
+(https://github.com/bookorbit/bookorbit, AGPL-3.0-only with §7 additional terms).
+
+What was referenced — ideas and structure only (methods, not protectable expression):
+  · two-tier evidence ranking (exact ISBN stronger than fuzzy title match)
+  · match reasons expressed as data (enum), rendered by the UI per locale
+  · comparison showing only fields that differ between copies
+  · keeper selection by tuple comparison (no ambiguous "tie score")
+  · dismissals that survive a rescan
+
+What was NOT used:
+  · no BookOrbit code, constant tables, or data of any kind
+  · no copy of its weight table, stop-word list, or provider identifier maps
+  · all field sets, weights, thresholds and media-family rules are redefined for MyBooks/Calibre
+  · Chinese text handling (character bigrams, variant scoring, trailing-annotation stripping)
+    is this repository's own design; BookOrbit has no equivalent
+
+This tool therefore carries **no AGPL obligation**: it contains none of BookOrbit's code and is
+not derived from it. The LICENSE here is this tool's own (BSD-2-Clause, matching the MyBooks host).
