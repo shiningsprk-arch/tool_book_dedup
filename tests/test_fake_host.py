@@ -56,6 +56,76 @@ class FakeBackgroundService(object):
         return FakeBackgroundService._tasks.get(task_id)
 
 
+class FakeAsyncService(object):
+    """`AsyncService` 的替身，**关键是复刻"注入 db"这一步**。
+
+    真实现里 `self.db` 不是 BaseTool 自带的：`AsyncService.setup()` 才给它赋值，而 setup 只在
+    `register_function` / `register_service` 的包装里被调用。假宿主如果省掉这一步，
+    「工具装上后一直显示共 0 本书」这类 bug 就**测不出来**——本工具就这么漏过一次
+    （`ScopeHandler` 直接 `BookDedupTool().api.calibre.all_book_ids()` → `db=None`）。
+    所以这里的 wrapper 必须真的 setup，而不是只把函数包一层。
+    """
+
+    _singleton = None
+
+    def __init__(self, calibre_db=None):
+        self.db = calibre_db
+
+    def setup(self, calibre_db=None, scoped_session=None, need_check_db=False):
+        self.db = calibre_db
+        self.session = (scoped_session or (lambda: None))()
+
+    def scoped_session(self):
+        return lambda: None
+
+    # 宿主 db：`main.py:398` 用真库调 `AsyncService().setup(book_db, ...)`，
+    # 之后所有 `register_*` 包装都从这里取 db 注入。假宿主照做，否则注入的是 None。
+    library = None
+
+    @classmethod
+    def instance(cls):
+        if cls._singleton is None:
+            cls._singleton = cls(cls.library)
+        return cls._singleton
+
+    @staticmethod
+    def register_function(service_func):
+        def wrapper(ins, *args, **kwargs):
+            ins.setup(FakeAsyncService.instance().db)
+            return service_func(ins, *args, **kwargs)
+        wrapper.__name__ = getattr(service_func, '__name__', 'wrapped')
+        return wrapper
+
+
+REAL_CORE_API = {'cls': None}
+
+
+def _load_real_core_api():
+    """从 MyBooks clone 加载**真的** `webserver/toolbox/core_api.py`（找不到就留空）。
+
+    为什么必须用真的：`api.calibre` 是**调用时**去读 `self._owner.db`（core_api.py 里
+    `_NamespaceBase` 的注释写明了不能提前缓存）。「没经过 register_* 就没有 db」这条性质
+    正是靠这个懒取才成立；用一个把整层替掉的 FakeApi 会让这类 bug 隐形——本工具就漏过一次
+    （装到真宿主后"一直显示共 0 本书"）。
+    """
+    if REAL_CORE_API['cls'] is not None:
+        return
+    clone = os.path.abspath(os.path.join(ROOT, '..', 'mybooks源码', 'mybooks-v4.2.1'))
+    path = os.path.join(clone, 'webserver', 'toolbox', 'core_api.py')
+    if not os.path.exists(path):
+        return
+    spec = importlib.util.spec_from_file_location('real_core_api_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as err:  # noqa: BLE001
+        # 不静默：加载失败会让回归断言变成 skip，看起来像"本机没 clone"，
+        # 实际上是桩不全 —— 那正好是这次要防的同类问题
+        print('[harness] 真 CoreAPI 加载失败：%s: %s' % (type(err).__name__, err))
+        return
+    REAL_CORE_API['cls'] = getattr(module, 'CoreAPI', None)
+
+
 def _install_fake_webserver(tmp_root, library_api):
     """把 webserver.* 换成一堆刚好够用的替身。"""
     modules = {}
@@ -71,7 +141,7 @@ def _install_fake_webserver(tmp_root, library_api):
     def _(text):
         return text
 
-    module('webserver')
+    module('webserver', loader=types.SimpleNamespace(get_settings=lambda: {}))
     module('webserver.i18n', _=_)
 
     handlers_mod = types.ModuleType('webserver.handlers')
@@ -86,7 +156,19 @@ def _install_fake_webserver(tmp_root, library_api):
         _counters = {'task': 100}
 
         def __init__(self):
-            self.api = library_api
+            real = REAL_CORE_API['cls']
+            # 有真 CoreAPI 就用真的（行为等同宿主）；没有（本机无 clone）才退回 FakeApi，
+            # 此时相关回归断言会明确 skip，而不是假通过。
+            self.api = real(self) if real is not None else library_api
+            # 刻意置 None：真 BaseTool 也没有 db，它靠 register_* 里的 setup() 注入。
+            # 不能省这一行——否则上一次用例残留的 db 会让"未初始化应当失败"的回归测试假通过。
+            self.db = None
+            self.session = None
+
+        def setup(self, calibre_db=None, scoped_session=None, need_check_db=False):
+            self.db = calibre_db
+            self.session = (scoped_session or (lambda: None))()
+
 
         @classmethod
         def tool_id(cls):
@@ -103,6 +185,19 @@ def _install_fake_webserver(tmp_root, library_api):
 
         def cleanup_work_dir(self, work_dir):
             pass
+
+        # --- 宿主 BaseTool 里被 CoreAPI 转发过来的那几个（真 core_api 会调它们）
+        def get_all_book_ids(self):
+            return self.db.new_api.all_book_ids()
+
+        def get_book_metadata(self, book_id):
+            return None
+
+        def merge_book_formats(self, source_book_id, target_book_id):
+            return self.db.merge_formats(source_book_id, target_book_id)
+
+        def delete_book_by_id(self, book_id):
+            self.db.delete_book(book_id)
 
         def create_task(self, progress_data=None):
             FakeTool._counters['task'] += 1
@@ -125,10 +220,17 @@ def _install_fake_webserver(tmp_root, library_api):
                 task.status = 'failed' if error_message else 'completed'
                 task.error_message = error_message
 
-    module('webserver.services')
+    # 真 CoreAPI 的模块级依赖（本工具用不到那几个方法，但 import 会求值）
+    module('webserver.base')
+    module('webserver.base.formatter', SimpleBookFormatter=object)
+    module('webserver.base.global_state', get_global_state=lambda: None)
+    _load_real_core_api()
+    module('webserver.services', AsyncService=FakeAsyncService)
+    module('webserver.services.async_service', AsyncService=FakeAsyncService)
     module('webserver.services.background_service',
            BackgroundService=FakeBackgroundService, BackgroundTask=FakeTask)
     module('webserver.toolbox')
+    FakeAsyncService.library = library_api
     module('webserver.toolbox.base_tool', BaseTool=FakeTool)
     return modules, FakeTool
 
@@ -171,8 +273,22 @@ class FakeCalibre(object):
 
 
 class FakeApi(object):
+    """CoreAPI 的替身，同时站在**两个位置**上：
+
+    - 测试代码用它：`api.calibre.books` / `api.calibre.calls`（现有用法）
+    - 真 `CoreAPI` 用它当**宿主 db**：`self._owner.db.new_api.all_book_ids()`
+
+    所以 `new_api` 指回自己 —— `FakeCalibre` 上已经实现了那些"库方法"。
+    不这样做的话，`CalibreAPI.all_book_ids()`（转发 `owner.get_all_book_ids()`，
+    后者读 `self.db.new_api`）就会 AttributeError，看起来像工具坏了。
+    """
+
     def __init__(self, books):
         self.calibre = FakeCalibre(books)
+
+    @property
+    def new_api(self):
+        return self.calibre
 
 
 def load_tool(tmp_root, api, shared_root=None):
@@ -302,6 +418,61 @@ class TestToolWiring(unittest.TestCase):
         other = dict(built)
         other['generated_at'] = '1999-01-01 00:00:00'
         self.assertFalse(self.driver.marker_matches(marker, 7, other))
+
+    def test_calibre_access_requires_setup(self):
+        """**回归**：直接 `BookDedupTool()` 再用 `api.calibre` 会拿 `db=None` 崩掉。
+
+        工具装到真宿主后"一直显示共 0 本书、开始按钮点不动"就是这个——`self.db` 由
+        `AsyncService.setup()` 注入，而 setup 只在 `register_*` 的包装里被调用。
+        这条测试在假宿主**真的会注入 db**的前提下才有意义（假宿主若省掉 setup，
+        它会跟着一起假通过，正是当初漏掉这个 bug 的原因）。
+        """
+        if REAL_CORE_API['cls'] is None:
+            self.skipTest('本机没有 MyBooks clone，无法用真 CoreAPI 验证这条')
+        raw = self.tool.BookDedupTool()
+        # 没经过 register_function 就没有 db；真 CoreAPI 会在这里炸
+        with self.assertRaises(Exception):
+            raw.api.calibre.all_book_ids()
+        # 走带装饰器的方法才行
+        self.assertEqual(len(raw.all_book_ids()), len(self.api.calibre.all_book_ids()))
+
+    def test_resolve_book_ids_expands_empty_to_whole_library(self):
+        """空列表 = 全库（几万个 id 不该传到浏览器再传回来）。"""
+        tool = self.tool.BookDedupTool()
+        self.assertEqual(sorted(tool.resolve_book_ids([])),
+                         sorted(self.api.calibre.all_book_ids()))
+        self.assertEqual(tool.resolve_book_ids([3, 4]), [3, 4])
+
+    def test_scope_and_start_handlers_get_real_ids(self):
+        """扫一遍扫描参数装配：/start 传空列表时要能拿到全库 id，而不是空。"""
+        tool = self.tool.BookDedupTool()
+        ids = tool.resolve_book_ids([])
+        self.assertTrue(ids, '全库展开拿不到任何 id')
+        written = None
+
+        class _Recorder:
+            def __call__(self, *args, **kwargs):
+                nonlocal written
+                written = args
+
+            def start(self):
+                pass
+
+        # 用真实 driver 跑一次，确认全库 id 能一路走到报告
+        built = self.driver.run_scan(self.api, ids, threshold=0.85)
+        self.assertEqual(built['scanned_books'], len(ids))
+
+    def test_merge_path_uses_db_injected_api(self):
+        """合并走的是写路径，同样必须先有 db——用 api_proxy() 而非裸 api。"""
+        built, work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(work_dir)
+        position = 0
+        keeper = report['groups'][position]['members'][0]['id']
+        proxy = self.tool.BookDedupTool().api_proxy()
+        plan, error = self.merge.build_plan(
+            proxy, work_dir, position, keeper_id=keeper)
+        self.assertIsNone(error, error)
+        self.assertTrue(plan['steps'])
 
     def test_groups_filters_by_confidence(self):
         built, work_dir = scan(self.tool, self.driver, self.api)

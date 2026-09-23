@@ -34,6 +34,7 @@ from typing import Optional
 
 from webserver.handlers.base import BaseHandler, is_admin, js
 from webserver.i18n import _
+from webserver.services import AsyncService
 from webserver.services.background_service import BackgroundService, BackgroundTask
 from webserver.toolbox.base_tool import BaseTool
 
@@ -71,7 +72,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.0',
+            'revision': '0.1.1',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -138,6 +139,40 @@ class BookDedupTool(BaseTool):
         with cls._records_lock:
             return cls._records
 
+    # ---------------------------------------------------------------- 取数
+
+    # **必须带 `@AsyncService.register_function`**：`self.db` 是 `AsyncService.setup()` 注入的，
+    # 而 `setup` 只在 `register_function` / `register_service` 的包装里被调用；`register_service`
+    # 又是**异步**的（生产环境 `async_mode()` 恒真，丢队列后返回 None），handler 同步拿不到值。
+    # 直接 `BookDedupTool()` 再调 `self.api.calibre.*` 会拿到 `db=None` → AttributeError。
+    # 这个坑的代价是"工具装上后一直显示共 0 本书、开始按钮点不动"。
+    @AsyncService.register_function
+    def all_book_ids(self):
+        """全库 book_id（handler 侧的入口）。"""
+        return list(self.api.calibre.all_book_ids())
+
+    @AsyncService.register_function
+    def api_proxy(self):
+        """返回一个**已注入 db** 的 `CoreAPI`，供需要写书库的 handler 使用。
+
+        合并（`/merge`）与预览（`/merge_plan`）都要读格式列表、调 `merge_formats`、
+        删记录——这些全在 `self.api.calibre` 上，而 `api` 本身不会触发 `setup()`。
+        所以写操作也必须经由带 `register_function` 的方法，让宿主先把 db 装上。
+        只读、且不需要返回值的方法（如后台线程里的扫描）可以直接用 `AsyncService().db`。
+        """
+        return self.api
+
+    @AsyncService.register_function
+    def resolve_book_ids(self, book_ids):
+        """把请求里的 id 列表解析成要扫描的列表；空列表 = 整个书库。
+
+        空列表展开放在**这里**而不是前端：几万个 id 不该传到浏览器再传回来。
+        """
+        ids = list(book_ids or [])
+        if not ids:
+            ids = list(self.api.calibre.all_book_ids())
+        return ids
+
     @classmethod
     def shared_dir(cls) -> str:
         """工具共享目录（无 key 那级）：`latest.json` 落在这里，路径不随 task_id 变。"""
@@ -158,6 +193,16 @@ class BookDedupTool(BaseTool):
         """后台线程主体：跑一遍 driver.run_scan，落盘报告与指针，最后关任务。"""
         tool = cls()
         work_dir = cls.report_dir(task_id)
+        # 后台线程不走 `register_*` 的包装，所以 `tool.db` 不会被注入。而
+        # `CoreAPI.calibre` 是**调用时**去读 `self._owner.db`（core_api.py:40-50 的注释），
+        # 因此这里把单例上的 db 挂到实例上就够了——否则整库扫描会拿 `db=None` 崩掉。
+        try:
+            tool.db = AsyncService().db
+        except Exception as err:  # noqa: BLE001
+            logging.error('[book_dedup] 取宿主 db 失败，扫描无法进行: %s', err)
+            tool.complete_task(task_id, error_message=_('无法访问书库'))
+            cls.release_task()
+            return
 
         def on_progress(done, total, phase=''):
             try:
@@ -215,10 +260,6 @@ def _parse_body(handler) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
-def tool_all_ids():
-    """全库 book_id（`/start` 收到空列表时用它展开）。"""
-    return list(BookDedupTool().api.calibre.all_book_ids())
-
 
 def _report_dir_for(tool, task_id=None):
     """解析本次要读的工作目录：显式 task_id 优先，否则回退到 latest 标记。"""
@@ -238,10 +279,10 @@ class ScopeHandler(BaseHandler):
     async def get(self):
         tool = BookDedupTool()
         try:
-            total = len(tool.api.calibre.all_book_ids())
+            total = len(tool.all_book_ids())
         except Exception as err:  # noqa: BLE001
-            logging.warning('[book_dedup] book count failed: %s', err)
-            total = 0
+            logging.error('[book_dedup] 读取全库 id 失败: %s', err, exc_info=True)
+            return {'err': 'scope.failed', 'msg': _('读取书库失败')}
         return {
             'err': 'ok',
             'data': {
@@ -271,13 +312,12 @@ class StartHandler(BaseHandler):
         book_ids = payload.get('book_ids') or []
         if not isinstance(book_ids, list) or any(not isinstance(i, int) for i in book_ids):
             return {'err': 'params.invalid', 'msg': _('book_ids 必须是整数数组')}
-        # 空列表 = 整个书库。前端不该把几万个 id 传到浏览器再传回来，所以这里展开。
-        if not book_ids:
-            try:
-                book_ids = tool_all_ids()
-            except Exception as err:  # noqa: BLE001
-                logging.error('[book_dedup] 读取全库 id 失败: %s', err)
-                return {'err': 'scope.failed', 'msg': _('读取书库失败')}
+        # 空列表 = 整个书库。展开走带装饰器的方法（前端不该把几万个 id 传一圈回来）。
+        try:
+            book_ids = BookDedupTool().resolve_book_ids(book_ids)
+        except Exception as err:  # noqa: BLE001
+            logging.error('[book_dedup] 读取全库 id 失败: %s', err, exc_info=True)
+            return {'err': 'scope.failed', 'msg': _('读取书库失败')}
         if not book_ids:
             return {'err': 'scope.empty', 'msg': _('书库为空')}
         if len(book_ids) > MAX_BOOKS:
@@ -472,7 +512,7 @@ class MergePlanHandler(BaseHandler):
             return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
 
         plan, error = merge_mod.build_plan(
-            tool.api, work_dir, index_arg,
+            tool.api_proxy(), work_dir, index_arg,
             keeper_id=self.get_argument('keeper_id', None),
             keep_rule=self.get_argument('keep_rule', None),
             task_id=self.get_argument('task_id', None))
@@ -507,14 +547,14 @@ class MergeHandler(BaseHandler):
             return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
 
         plan, error = merge_mod.build_plan(
-            tool.api, work_dir, index_arg,
+            tool.api_proxy(), work_dir, index_arg,
             keeper_id=payload.get('keeper_id'),
             keep_rule=payload.get('keep_rule'),
             task_id=payload.get('task_id'))
         if error:
             return error
 
-        result = merge_mod.execute(tool.api, work_dir, plan, delete_source=delete_source)
+        result = merge_mod.execute(tool.api_proxy(), work_dir, plan, delete_source=delete_source)
         if result.get('err') != 'ok':
             return result
         return {'err': 'ok', 'data': result['data']}
