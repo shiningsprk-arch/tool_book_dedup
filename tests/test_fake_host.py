@@ -995,6 +995,222 @@ class TestDelete(unittest.TestCase):
         self.assertEqual(set(before) - set(after), {2})
 
 
+class TestPartialMergeSelection(unittest.TestCase):
+    """0.1.5：只合并用户勾选的那几本，没勾的原样保留。
+
+    一组三本（1 / 2 / 6），保留项 1。勾选的才进 `steps`，没勾的进 `kept` 并且
+    **不许被动**（记录还在、还在组里）。
+    """
+
+    def setUp(self):
+        FakeBackgroundService._tasks = {}
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_partial_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_partial_shared_')
+        self.api = FakeApi(make_books())
+        self.api.calibre.books[6] = {
+            'id': 6, 'title': '三体（全本）', 'authors': ['刘慈欣'],
+            'available_formats': ['AZW3'], 'isbn': '',
+            'timestamp': '2026-06-01T00:00:00+00:00', '_paths': {}}
+        # 造真的格式文件：`load_records` 的体积是按磁盘文件算的。假路径会让
+        # "可回收空间"恒等于 0，而"数字按勾选口径"这条断言正是要盯它。
+        blobs = os.path.join(self.tmp, 'blobs')
+        os.makedirs(blobs, exist_ok=True)
+
+        def blob(book_id, fmt, size):
+            path = os.path.join(blobs, '%s.%s' % (book_id, fmt.lower()))
+            with open(path, 'wb') as handle:
+                handle.write(b'x' * size)
+            return path
+
+        self.api.calibre.books[1]['_paths'] = {
+            'EPUB': blob(1, 'EPUB', 100), 'MOBI': blob(1, 'MOBI', 200)}
+        self.api.calibre.books[2]['_paths'] = {
+            'EPUB': blob(2, 'EPUB', 100), 'PDF': blob(2, 'PDF', 400)}
+        self.api.calibre.books[6]['_paths'] = {'AZW3': blob(6, 'AZW3', 800)}
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
+        self.tool_class = self.tool.BookDedupTool
+        self.tool_class._last_task_id = None
+        self.tool_class._accepted = False
+        self.built, self.work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(self.work_dir)
+        self.position = None
+        for index, group in enumerate(report['groups']):
+            if {m['id'] for m in group['members']} == {1, 2, 6}:
+                self.position = index
+                break
+        self.assertIsNotNone(self.position, '三本的那一组没成组')
+
+    def test_plan_only_covers_selected_members(self):
+        """勾了哪几本，预览里就只有哪几步；没勾的进 `kept` 一起回。"""
+        plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[2])
+        self.assertIsNone(error, error)
+        self.assertEqual([step['source_id'] for step in plan['steps']], [2])
+        self.assertEqual(plan['source_ids'], [2])
+        self.assertEqual([item['id'] for item in plan['kept']], [6])
+        self.assertEqual(plan['kept'][0]['title'], '三体（全本）')
+
+    def test_subset_merge_leaves_unchecked_book_alone(self):
+        """没勾的那本：记录还在、还能在组里继续处理。"""
+        plan, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[2])
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['removed_ids'], [2])
+        self.assertEqual([item['id'] for item in result['data']['kept']], [6])
+        self.assertNotIn(2, self.api.calibre.books)
+        self.assertIn(6, self.api.calibre.books)                  # 没勾的没被删
+        self.assertNotIn(('delete_book', 6), self.api.calibre.calls)
+        # 勾选的那本格式照旧并进保留项，没勾的那本独有的 AZW3 不该被带过来
+        self.assertIn('PDF', self.api.calibre.books[1]['available_formats'])
+        self.assertNotIn('AZW3', self.api.calibre.books[1]['available_formats'])
+
+        # 记账里也要留下"哪几本没动"，否则事后看台账会以为这一组处理干净了
+        ledger = self.write_ops.read_merged(self.work_dir)
+        self.assertEqual([item['id'] for item in ledger[-1]['kept']], [6])
+
+        # 这一组还剩 1 + 6 → 仍可继续处理
+        plan2, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[6])
+        self.assertIsNone(error, error)
+        self.assertEqual([step['source_id'] for step in plan2['steps']], [6])
+
+    def test_plan_numbers_are_scoped_to_selection(self):
+        """数字按勾选口径：沿用全组会虚报（用户是照这个数做决定的）。"""
+        whole, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1)
+        subset, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[2])
+        # 全组：#2 的 PDF + #6 的 AZW3 都要复制；只勾 #2 时只剩 PDF
+        self.assertEqual(whole['moved_total'], 2)
+        self.assertEqual(subset['moved_total'], 1)
+        self.assertLess(subset['reclaimable_bytes'], whole['reclaimable_bytes'])
+        self.assertEqual(subset['kept'][0]['id'], 6)
+
+    def test_foreign_id_is_refused_and_nothing_is_written(self):
+        """守门：勾选集必须是这一组的成员——**勾选不是"传 id 就能删书"的口子**。"""
+        _plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[5])
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'source.not_in_group')
+        self.assertIn('5', error['msg'])
+        self.assertEqual(self.api.calibre.calls, [])
+        self.assertEqual(self.write_ops.read_merged(self.work_dir), [])
+
+    def test_keeper_in_selection_is_refused(self):
+        _plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[1, 2])
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'source.is_keeper')
+        self.assertEqual(self.api.calibre.calls, [])
+
+    def test_empty_selection_means_nothing_not_everything(self):
+        """`[]` 与"没传这个字段"必须分开：前者一本都不并，后者才是全组。
+
+        把空数组当成"缺省"，前端一次状态丢失就会静悄悄把整组并掉。
+        """
+        _plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[])
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'merge.nothing')
+        self.assertEqual(self.api.calibre.calls, [])
+
+        # 缺省仍然是全组（0.1.4 的行为不退化）
+        plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1)
+        self.assertIsNone(error)
+        self.assertEqual(sorted(step['source_id'] for step in plan['steps']), [2, 6])
+        self.assertEqual(plan['kept'], [])
+
+    def test_bad_selection_is_rejected(self):
+        for bad in ('abc', [1, 'x'], {'a': 1}, True, [True]):
+            _plan, error = self.write_ops.build_plan(
+                self.api, self.work_dir, self.position, keeper_id=1, source_ids=bad)
+            self.assertIsNotNone(error, bad)
+            self.assertEqual(error['err'], 'params.invalid', bad)
+        self.assertEqual(self.api.calibre.calls, [])
+
+    def test_csv_selection_is_parsed(self):
+        """`/merge_plan` 的 GET 参数是逗号串（与 `/merge` 的数组共用同一个解析）。"""
+        plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids='2, 6')
+        self.assertIsNone(error, error)
+        self.assertEqual(sorted(step['source_id'] for step in plan['steps']), [2, 6])
+
+    def test_partial_merge_keeps_group_but_drops_deleted_titles(self):
+        """只合并一部分之后：这一组还在列表里，但行里**不许**再出现已删的书名。"""
+        plan, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, self.position, keeper_id=1, source_ids=[2])
+        self.write_ops.execute(self.api, self.work_dir, plan)
+
+        index = self.driver.read_index(self.work_dir)
+        rows = self.tool._visible_groups(
+            index['groups'], self.write_ops.gone_ids(self.work_dir))
+        row = [item for item in rows if item['index'] == self.position][0]
+        self.assertEqual(row['titles'], ['三体', '三体（全本）'])
+        self.assertEqual(row['member_count'], 2)
+        self.assertEqual(row['stale_count'], 1)
+        self.assertFalse(row['preview_truncated'])
+        for title in row['titles']:
+            self.assertNotIn('全集', title)                       # 已被删掉的那本
+
+    def test_visible_groups_falls_back_on_old_index(self):
+        """0.1.4 写的索引没有全量标题：只标记 stale_count，不许炸。"""
+        index = self.driver.read_index(self.work_dir)
+        legacy = []
+        for group in index['groups']:
+            row = dict(group)
+            row.pop('member_titles', None)
+            row.pop('member_authors', None)
+            legacy.append(row)
+        rows = self.tool._visible_groups(legacy, {2})
+        row = [item for item in rows if item['index'] == self.position][0]
+        self.assertEqual(row['stale_count'], 1)
+        self.assertTrue(row['titles'])                            # 旧字段原样保留
+
+    def test_row_bytes_are_scoped_to_live_members(self):
+        """行里的"可回收/同格式重占"必须按活着的成员重算，不把已删的书算进去。"""
+        index = self.driver.read_index(self.work_dir)
+        before = [item for item in index['groups']
+                  if item['index'] == self.position][0]
+        self.assertGreater(before['reclaimable_bytes'], 0, '前提：这一组有体积')
+
+        self.write_ops.execute_delete(self.api, self.work_dir, self.position, 6)
+        gone = self.write_ops.gone_ids(self.work_dir)
+        rows = self.tool._visible_groups(index['groups'], gone)
+        row = [item for item in rows if item['index'] == self.position][0]
+        self.assertEqual(row['stale_count'], 1)
+        # #6 的体积（800 字节的 AZW3）不该再算进去
+        self.assertEqual(row['reclaimable_bytes'],
+                         before['reclaimable_bytes'] - 800)
+
+    def test_group_diff_is_rebuilt_for_live_members(self):
+        """**回归（0.1.5 浏览器实测）**：滤掉已消失的成员之后，对照表要按活着的成员重建。
+
+        表格是扫描时按当时那批成员算的；只裁成员不重算表格，表头 2 列而每行 3 格，
+        用户看到的是"三个数字排在两个书名下面"（错位的信息，比缺一格更糟）。
+        """
+        self.write_ops.execute_delete(self.api, self.work_dir, self.position, 6)
+        group = self.driver.read_report(self.work_dir, group_index=self.position)
+        self.assertEqual(len(group['members']), 3)
+        self.assertEqual(len(group['diff']['rows'][0]['cells']), 3)   # 扫描时的旧表格
+
+        # 走 /group 的那条路（成员滤过之后重建）
+        from importlib import import_module
+        pkg = import_module(self.tool.__name__.rsplit('.', 1)[0])
+        diff_mod = import_module(pkg.__name__ + '.dedup.diff')
+        gone = self.write_ops.gone_ids(self.work_dir)
+        members = [m for m in group['members'] if m['id'] not in gone]
+        rebuilt = diff_mod.build_table(
+            self.write_ops.to_diff_members(members))
+        self.assertEqual(len(members), 2)
+        for row in rebuilt['rows']:
+            self.assertEqual([cell['book_id'] for cell in row['cells']],
+                             [m['id'] for m in members])
+        # `meta_score → _meta_score` 这一手必须在：否则"元数据"整行会变 0 而被折叠掉
+        self.assertIn('metadata', [row['field'] for row in rebuilt['rows']])
+
+
 class TestWritePathGuard(unittest.TestCase):
     """守门：整个工具只有 merge.py 允许调用删/改书库的方法。"""
 

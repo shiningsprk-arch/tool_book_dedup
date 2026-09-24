@@ -411,6 +411,10 @@ def write_index(work_dir, report):
     2. **列表行要直接可读**。只给 `member_count` 的话每行都只能写"x 本可能是同一本书"，
        用户必须逐行点开才知道是哪些书（真机反馈原话：不直观、不合理）。所以顺带存
        `PREVIEW_TITLES` 个成员标题与作者——组索引只多几 KB，列表却一眼能读。
+    3. **但这几个标题会过期**。扫描之后用户很可能只合并了其中一部分（0.1.5 起是常态），
+       已删掉的书还在索引里写着名字。所以再存一份**全量**的 `member_titles` /
+       `member_authors`（与 `members` 同序），`/groups` 用它扣掉已消失的成员重算行标题。
+       一组最多几本，1163 组也只多几十 KB。
     """
     groups = report.get('groups') or []
     index = []
@@ -424,6 +428,14 @@ def write_index(work_dir, report):
             # 顺序错位会让界面把"保留项"标到别的书上
             'titles': [m.get('title') or '' for m in previews],
             'authors': [(m.get('authors') or [''])[0] for m in previews],
+            # 全量那一份，只给 `/groups` 扣已删成员用（见本函数第 3 条）
+            'member_titles': [m.get('title') or '' for m in members],
+            'member_authors': [(m.get('authors') or [''])[0] for m in members],
+            # 体积与格式：行里的"可回收/同格式重占"是按**活着的成员**算的，
+            # 扫描时那份数字在部分合并之后会把已经删掉的书也算进去
+            'member_sizes': [int(m.get('size') or 0) for m in members],
+            'member_formats': [sorted(str(f).upper() for f in (m.get('formats') or []))
+                               for m in members],
             'preview_truncated': len(members) > PREVIEW_TITLES,
             'keeper_id': (group.get('recommendation') or {}).get('keeper_id'),
             'confidence': group.get('confidence'),
@@ -529,7 +541,7 @@ def restored_progress(marker, index=None):
 # --------------------------------------------------------------------------- 合并计划
 
 
-def merge_plan(api, members, keeper_id):
+def merge_plan(api, members, keeper_id, source_ids=None):
     """把一次"合并这一组"拆成可执行的计划，并把**会丢什么**说清楚。
 
     这是写操作前最重要的一步。两件事必须在动手前摆给用户看：
@@ -539,12 +551,21 @@ def merge_plan(api, members, keeper_id):
        源书那份会被丢弃，留下的是 keeper 的版本。
     2. **源记录的关联数据不会被迁移**：宿主删除会级联清理收藏/在读/进度/评分/书评/书单关联
        （上游 issue #82 的修复），但那是删除不是迁移——不会搬到保留项上。
+
+    :param source_ids: 只对**勾选的那几本**出步骤；``None`` = 除保留项外全部（0.1.4 的行为）。
+        未勾选的进 `kept` 一起回给界面——"哪几本没动"必须和"哪几本会动"一样看得见。
+        这里的 id 已由 `write_ops.build_plan` 对着本次扫描的成员核对过；本函数只是取数，
+        不做权限判断（守门只有一处，别在这里复制一份会走样的）。
     """
     by_id = {r['id']: r for r in members}
     target = by_id.get(keeper_id)
     if target is None:
         return {'error': 'keeper.missing'}
-    sources = [r for r in members if r['id'] != keeper_id]
+    wanted = None if source_ids is None else set(source_ids)
+    sources = [r for r in members
+               if r['id'] != keeper_id and (wanted is None or r['id'] in wanted)]
+    kept = [r for r in members
+            if r['id'] != keeper_id and wanted is not None and r['id'] not in wanted]
 
     keeper_formats = set(f.upper() for f in (target.get('formats') or []))
     steps = []
@@ -559,15 +580,23 @@ def merge_plan(api, members, keeper_id):
             'size': int(record.get('size') or 0),
         })
 
+    # 数字一律按"这次真的要动的那些书"算：沿用全组会虚报（用户是照这个数做决定的）
+    moving = [target] + sources
     return {
         'keeper_id': keeper_id,
         'keeper_title': target.get('title') or '',
         'keeper_formats': sorted(keeper_formats),
         'steps': steps,
+        'kept': [{
+            'id': record['id'],
+            'title': record.get('title') or '',
+            'formats': sorted(str(f).upper() for f in (record.get('formats') or [])),
+            'size': int(record.get('size') or 0),
+        } for record in kept],
         'moved_total': sum(len(s['moved_formats']) for s in steps),
         'dropped_total': sum(len(s['dropped_formats']) for s in steps),
-        'reclaimable_bytes': keeper.reclaimable_bytes(members, keeper_id),
-        'disk_waste_bytes': keeper.duplicate_disk_waste(members, keeper_id),
+        'reclaimable_bytes': keeper.reclaimable_bytes(moving, keeper_id),
+        'disk_waste_bytes': keeper.duplicate_disk_waste(moving, keeper_id),
         'warnings': [
             'working_formats_dropped',
             'source_records_not_migrated',

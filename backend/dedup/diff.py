@@ -116,6 +116,10 @@ def build_table(records):
 
     :return: ``{'shared': [...], 'rows': [{'field','label','cells':[...],'best_id'}],
                 'summary': str}``
+
+    **成员变过就要重算**（`/group` 会滤掉已合并/已删的成员）：表格是扫描时按当时那批
+    成员算的，滤掉一个成员之后表头会比每行的单元格少一格——用户看到的是"三个数字排在
+    两个书名下面"。所以调用方拿活着的成员**重建**，而不是裁剪旧表的单元格。
     """
     rows = []
     for field in differing_fields(records):

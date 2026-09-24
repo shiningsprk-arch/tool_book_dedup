@@ -118,11 +118,10 @@
     keyword: '',
     groups: [],
     filteredTotal: 0,
-    goneIds: [],
     removedTitles: [],
     deletedTitles: [],
     failedTitles: [],
-    active: null,        // 当前展开的分组 {index, group, keeperId}
+    active: null,        // 当前展开的分组 {index, group, keeperId, selected}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
     confirmDelete: null, // 正在确认删除的那本书 id（行内确认条）
@@ -453,7 +452,7 @@
     var query = ['page=' + state.page, 'size=' + state.pageSize];
     if (state.confidence) query.push('confidence=' + encodeURIComponent(state.confidence));
     if (state.keyword) query.push('keyword=' + encodeURIComponent(state.keyword));
-    api('groups?' + query.join('&')).then(function (resp) {
+    return api('groups?' + query.join('&')).then(function (resp) {
       if (!resp || resp.err !== 'ok') {
         el['list-meta'].textContent = (resp && resp.msg) || t('list.failed', '读取列表失败');
         el.groups.innerHTML = '';
@@ -462,7 +461,6 @@
       var data = resp.data;
       state.groups = data.groups || [];
       state.filteredTotal = data.filtered_total || 0;
-      state.goneIds = data.gone_ids || [];
       state.removedTitles = data.removed_titles || [];
       state.deletedTitles = data.deleted_titles || [];
       state.failedTitles = data.failed_titles || [];
@@ -520,6 +518,11 @@
       '<button class="bd-group-head" data-open="' + group.index + '">' +
         '<span class="bd-chip bd-chip-' + escapeHtml(group.confidence) + '">' +
           escapeHtml(t(CONFIDENCE_KEYS[group.confidence], group.confidence)) + '</span>' +
+        (group.stale_count
+          ? '<span class="bd-chip bd-chip-stale">' +
+            escapeHtml(t('list.staleHandled', '已处理 {n} 本')
+              .replace('{n}', group.stale_count)) + '</span>'
+          : '') +
         '<span class="bd-group-title">' + groupTitleHtml(group) + '</span>' +
         '<span class="bd-group-meta">' +
           escapeHtml(formatBytes(group.reclaimable_bytes)) + ' · ' +
@@ -594,11 +597,55 @@
   }
 
   function setActive(index, group) {
+    var keeperId = (group.recommendation || {}).keeper_id;
     state.active = {
       index: index,
       group: group,
-      keeperId: (group.recommendation || {}).keeper_id,
+      keeperId: keeperId,
+      selected: defaultSelection(group, keeperId),
     };
+    refreshDrawer();
+  }
+
+  /** 默认勾选：除保留项外**全部**勾上（保留项是合并的目标，不是要被合并掉的那一本）。 */
+  function defaultSelection(group, keeperId) {
+    var selected = {};
+    (group.members || []).forEach(function (member) {
+      selected[member.id] = member.id !== keeperId;
+    });
+    return selected;
+  }
+
+  /** 当前勾选"要合并掉"的 id（不含保留项，且只取还在成员里的）。 */
+  function selectedIds() {
+    if (!state.active) return [];
+    var keeperId = state.active.keeperId;
+    var picked = state.active.selected || {};
+    return (state.active.group.members || []).filter(function (member) {
+      return member.id !== keeperId && picked[member.id];
+    }).map(function (member) { return member.id; });
+  }
+
+  /** 勾选/保留项变了 → 已生成的预览作废（它的步骤与数字都是按旧选择算的）。 */
+  function invalidatePlan() {
+    state.plan = null;
+    state.confirmDelete = null;
+  }
+
+  function toggleSelected(bookId, checked) {
+    if (!state.active) return;
+    state.active.selected[bookId] = !!checked;
+    invalidatePlan();
+    refreshDrawer();
+  }
+
+  function selectAll(checked) {
+    if (!state.active) return;
+    var keeperId = state.active.keeperId;
+    (state.active.group.members || []).forEach(function (member) {
+      state.active.selected[member.id] = member.id !== keeperId && !!checked;
+    });
+    invalidatePlan();
     refreshDrawer();
   }
 
@@ -611,10 +658,13 @@
 
   function pickKeeper(bookId) {
     if (!state.active) return;
+    var previous = state.active.keeperId;
     state.active.keeperId = bookId;
-    // 换了保留项 → 之前生成的合并预览作废（它的 keeper_id 已经指向别的书了）
-    state.plan = null;
-    state.confirmDelete = null;
+    // 保留项不是"要合并掉的那一本"：新保留项从勾选集里摘掉，被换下来的那一本
+    // 重新变回候补就补勾——否则默认全勾的用户换一次保留项，会发现老保留项被留在外面
+    state.active.selected[bookId] = false;
+    if (previous && previous !== bookId) state.active.selected[previous] = true;
+    invalidatePlan();
     refreshDrawer();
   }
 
@@ -662,6 +712,15 @@
         pickKeeper(Number(node.getAttribute('data-pick')));
       });
     });
+    drawer.querySelectorAll('[data-src]').forEach(function (node) {
+      node.addEventListener('change', function () {
+        toggleSelected(Number(node.getAttribute('data-src')), node.checked);
+      });
+    });
+    var pickAll = drawer.querySelector('[data-select-all]');
+    if (pickAll) pickAll.addEventListener('click', function () { selectAll(true); });
+    var pickNone = drawer.querySelector('[data-select-none]');
+    if (pickNone) pickNone.addEventListener('click', function () { selectAll(false); });
     drawer.querySelectorAll('[data-jump]').forEach(function (node) {
       node.addEventListener('click', function () {
         openBook(Number(node.getAttribute('data-jump')));
@@ -751,10 +810,34 @@
       escapeHtml(label.replace('{title}', titleOf(members, keeper))) +
       (reasonText ? ' · ' + escapeHtml(reasonText) : '') + '</p>';
 
+    var chosen = selectedIds().length;
+    var pickRow = '<div class="bd-select-all">' +
+      '<span class="bd-hint' + (chosen ? '' : ' bd-warn-hint') + '">' +
+        escapeHtml(chosen
+          ? t('bench.selectedCount', '已勾选 {n} 本将并入保留项（没勾的原样保留）')
+              .replace('{n}', chosen)
+          : t('bench.pickNoneHint', '还没勾选要合并的书：没勾的就原样保留，不会被动')) +
+      '</span>' +
+      '<button class="bd-btn bd-btn-small" data-select-all="1">' +
+        escapeHtml(t('bench.selectAll', '全选')) + '</button>' +
+      '<button class="bd-btn bd-btn-small" data-select-none="1">' +
+        escapeHtml(t('bench.selectNone', '全不选')) + '</button>' +
+    '</div>';
+
     var cards = members.map(function (member) {
       var isKeeper = member.id === keeper;
       var confirming = state.confirmDelete === member.id;
-      return '<div class="bd-copy' + (isKeeper ? ' bd-copy-keeper' : '') + '">' +
+      var picked = !isKeeper && !!(state.active && state.active.selected[member.id]);
+      // 保留项那张卡没有复选框：它是合并的目标，没法"被合并掉"
+      var pick = isKeeper ? '' :
+        '<label class="bd-copy-pick">' +
+          '<input type="checkbox" data-src="' + member.id + '"' +
+            (picked ? ' checked' : '') + '>' +
+          '<span>' + escapeHtml(t('bench.pickMerge', '一并合并')) + '</span>' +
+        '</label>';
+      return '<div class="bd-copy' + (isKeeper ? ' bd-copy-keeper' : '') +
+          (picked ? ' bd-copy-on' : '') + '">' +
+        pick +
         '<div class="bd-copy-head">' +
           '<span class="bd-copy-title">' + escapeHtml(member.title) + '</span>' +
           (isKeeper ? '<span class="bd-chip bd-chip-keep">' + escapeHtml(t('bench.keep', '保留')) + '</span>' : '') +
@@ -781,14 +864,15 @@
     // 动作按钮与安全提示都搬进抽屉：没有浮层了，合并预览也在同一块里就地展开
     var actions =
       '<div class="bd-drawer-actions">' +
-        '<button class="bd-btn bd-btn-primary" data-preview="1">' +
+        '<button class="bd-btn bd-btn-primary" data-preview="1"' +
+          (chosen ? '' : ' disabled') + '>' +
           escapeHtml(t('bench.preview', '先看合并预览')) + '</button>' +
         '<button class="bd-btn" data-collapse="1">' +
           escapeHtml(t('bench.collapse', '收起')) + '</button>' +
       '</div>' +
       '<p class="bd-hint bd-warn-hint">' + escapeHtml(t('bench.hint',
         '删除源记录会连带失去它的收藏/在读/阅读进度/评分/书单，请先确认要保留哪一本。')) + '</p>';
-    return head + '<div class="bd-copies">' + cards + '</div>' + table + actions;
+    return head + pickRow + '<div class="bd-copies">' + cards + '</div>' + table + actions;
   }
 
   function titleOf(members, bookId) {
@@ -806,6 +890,8 @@
         '<span class="bd-hint"> · ' + escapeHtml(t('bench.id', 'ID {id}').replace('{id}', member.id)) + '</span></p>' +
       '<p class="bd-hint bd-warn-hint">' + escapeHtml(t('del.warn',
         '会连带删除这本书记的收藏/在读/阅读进度/时长/评分/书评/书单归属——这些都**不会**搬到同组的其它书上。')) + '</p>' +
+      '<p class="bd-hint">' + escapeHtml(t('plan.trashHint',
+        '删掉的书会进书库回收站（后台 → 回收站 可以恢复）；但这本书记的收藏/在读/进度/评分/书评/书单归属会一起消失，恢复也带不回来。')) + '</p>' +
       '<div class="bd-confirm-actions">' +
         '<button class="bd-btn bd-btn-small bd-btn-danger" data-del-yes="' + member.id + '">' +
           escapeHtml(t('del.confirm', '确认删除')) + '</button>' +
@@ -823,8 +909,15 @@
         return '<th' + mark + '>' + escapeHtml(member.title) + '</th>';
       }).join('') + '</tr>';
     var rows = (diff.rows || []).map(function (row) {
+      // 逐列按 `book_id` 对齐当前成员：后端的表格与成员列表理论上同源，但一旦不同步
+      // （旧报告 + 已被合并掉的成员），把某一本的数字排到另一本的书名下面是**错误信息**，
+      // 比缺一格更糟。所以宁可显示 "—"，也不按位置硬塞。
+      var byId = {};
+      (row.cells || []).forEach(function (cell) { byId[cell.book_id] = cell; });
       return '<tr><td class="bd-td-field">' + escapeHtml(diffFieldLabel(row)) + '</td>' +
-        (row.cells || []).map(function (cell) {
+        members.map(function (member) {
+          var cell = byId[member.id];
+          if (!cell) return '<td>—</td>';
           var best = row.best_id && row.best_id === cell.book_id ? ' bd-td-best' : '';
           return '<td class="' + best.trim() + '">' +
             escapeHtml(diffCellText(cell)) + '</td>';
@@ -941,7 +1034,13 @@
   function openPlan() {
     if (!state.active) return;
     var index = state.active.index;
-    api('merge_plan?index=' + index + '&keeper_id=' + state.active.keeperId)
+    var ids = selectedIds();
+    if (!ids.length) {
+      notify(t('bench.pickNoneHint', '还没勾选要合并的书：没勾的就原样保留，不会被动'), 'warning');
+      return;
+    }
+    api('merge_plan?index=' + index + '&keeper_id=' + (state.active.keeperId || '') +
+        '&source_ids=' + ids.join(','))
       .then(function (resp) {
         if (!resp || resp.err !== 'ok') {
           notify((resp && resp.msg) || t('plan.failed', '生成合并预览失败'), 'error');
@@ -953,6 +1052,41 @@
         var node = el.groups.querySelector('.bd-plan');
         if (node && node.scrollIntoView) node.scrollIntoView({ block: 'nearest' });
       });
+  }
+
+  /** 勾选要删的成员里，有几本带着"会一起消失"的用户数据（评分/标签/简介）。
+   *
+   * 数据来自计划里的成员（报告形状本来就带 `rating` / `tags` / `comments_present`），
+   * 不额外去读书库——预览里多这一句的代价是零查询。
+   */
+  function userDataWarnHtml(plan) {
+    var byId = {};
+    (plan.members || []).forEach(function (member) { byId[member.id] = member; });
+    var affected = [];
+    (plan.steps || []).forEach(function (step) {
+      var member = byId[step.source_id];
+      if (!member) return;
+      var hasRating = (Number(member.rating) || 0) > 0;
+      var hasTags = (member.tags || []).length > 0;
+      if (hasRating || hasTags || member.comments_present) affected.push(member.title);
+    });
+    if (!affected.length) return '';
+    return '<p class="bd-hint bd-warn-hint">' +
+      escapeHtml(t('plan.userDataWarn', '勾选要删的这几本里，{n} 本带着你的评分/标签/简介：{titles}')
+        .replace('{n}', affected.length)
+        .replace('{titles}', affected.join(t('list.titleJoin', '、')))) + '</p>';
+  }
+
+  /** "未勾选、保持原样"那几本：让用户看清这次不动谁。 */
+  function keptLineHtml(plan) {
+    var kept = plan.kept || [];
+    if (!kept.length) return '';
+    return '<p class="bd-hint">' +
+      escapeHtml(t('plan.kept', '未勾选、保持原样 {n} 本：{titles}')
+        .replace('{n}', kept.length)
+        .replace('{titles}', kept.map(function (item) {
+          return '《' + item.title + '》';
+        }).join(t('list.titleJoin', '、')))) + '</p>';
   }
 
   /** 合并预览块（渲染在抽屉里，不再是浮层）。 */
@@ -974,12 +1108,14 @@
             escapeHtml((step.dropped_formats || []).join('、') || t('plan.none', '无')) + '</li>' +
         '</ul></li>';
     }).join('');
+    var count = (plan.steps || []).length;
 
     return '<div class="bd-plan">' +
       '<h3 class="bd-plan-title">' + escapeHtml(t('plan.title', '合并预览')) + '</h3>' +
       '<p class="bd-plan-head">' + escapeHtml(t('plan.keep', '保留：{title}')
         .replace('{title}', plan.keeper_title)) + '</p>' +
       '<ul class="bd-plan-steps">' + steps + '</ul>' +
+      keptLineHtml(plan) +
       '<div class="bd-plan-stats">' +
         '<span>' + escapeHtml(t('plan.movedTotal', '复制格式 {n} 个').replace('{n}', plan.moved_total)) + '</span>' +
         '<span>' + escapeHtml(t('plan.droppedTotal', '丢弃同格式 {n} 个').replace('{n}', plan.dropped_total)) + '</span>' +
@@ -988,16 +1124,23 @@
       '<ul class="bd-warnings">' + warnings.map(function (text) {
         return '<li>' + escapeHtml(text) + '</li>';
       }).join('') + '</ul>' +
+      userDataWarnHtml(plan) +
       '<label class="bd-check">' +
-        // **默认不勾**：删除是不可逆的（同名格式那一份直接丢弃、用户数据一起没了），
-        // 默认值不该是破坏性的那一个。要删就得自己勾一下。
-        '<input type="checkbox" data-delete-source>' +
-        '<span>' + escapeHtml(t('plan.deleteSource',
-          '同时删除重复记录（不勾则只合并格式，保留两条记录，之后可自行处理）')) + '</span>' +
+        // **默认勾上**：0.1.4 时"合并"意味着整组都并掉、这一击里没有"要删哪几本"的信息，
+        // 所以默认值取保守的那个。0.1.5 起勾选本身就是同意——用户逐本勾出来的才是要
+        // 合并掉的。不勾的后果也不是"什么都没做"：格式被复制过去、源记录还在，磁盘反而
+        // 多占一份，重复记录下次扫描照样报出来。所以默认指向"合并掉"，并在文案里带上数量。
+        '<input type="checkbox" data-delete-source checked>' +
+        '<span>' + escapeHtml(t('plan.deleteSourceCount', '合并后删除勾选的 {n} 条记录')
+          .replace('{n}', count)) + '</span>' +
       '</label>' +
+      '<p class="bd-hint">' + escapeHtml(t('plan.deleteSourceOff',
+        '不勾则只把格式并过去：两条记录都留着（同名格式那一份仍会被丢弃，磁盘占用不会下降）。')) + '</p>' +
+      '<p class="bd-hint">' + escapeHtml(t('plan.trashHint',
+        '删掉的书会进书库回收站（后台 → 回收站 可以恢复）；但这本书记的收藏/在读/进度/评分/书评/书单归属会一起消失，恢复也带不回来。')) + '</p>' +
       '<div class="bd-drawer-actions">' +
         '<button class="bd-btn bd-btn-primary" data-apply="1">' +
-          escapeHtml(t('plan.apply', '确认合并')) + '</button>' +
+          escapeHtml(t('plan.applyCount', '确认合并（{n} 本）').replace('{n}', count)) + '</button>' +
         '<button class="bd-btn" data-plan-cancel="1">' +
           escapeHtml(t('plan.cancel', '取消')) + '</button>' +
       '</div>' +
@@ -1008,6 +1151,7 @@
     if (!state.plan) return;
     var checkbox = el.groups.querySelector('[data-delete-source]');
     var button = el.groups.querySelector('[data-apply]');
+    var ids = state.plan.source_ids || selectedIds();
     if (button) button.disabled = true;
     api('merge', {
       method: 'POST',
@@ -1015,6 +1159,8 @@
       body: JSON.stringify({
         index: state.plan.index,
         keeper_id: state.plan.keeper_id,
+        // 服务端会拿这一串回本次扫描的成员里逐个核对（勾选不是"传 id 就能删书"的口子）
+        source_ids: ids,
         delete_source: !checkbox || checkbox.checked,
       }),
     }).then(function (resp) {
@@ -1028,11 +1174,18 @@
       // 以前这里只看 moved_total / removed_ids，5 本里失败 3 本也显示成完全成功。
       var moved = data.moved_total || 0;
       var removed = (data.removed_ids || []).length;
+      var kept = (data.kept || []).length;
       if (data.failed) {
         notify(t('plan.appliedPartial',
           '已合并：复制 {m} 个格式，删除 {d} 条重复记录；{f} 条失败（详见「本次已处理」）')
           .replace('{m}', moved).replace('{d}', removed).replace('{f}', data.failed),
           'error');
+      } else if (kept) {
+        // 没勾的那几本还在书库里 → 组还在列表上，说清楚还剩几本
+        notify(t('plan.appliedKept',
+          '已合并：复制 {m} 个格式，删除 {d} 条重复记录；{k} 本未勾选、保持原样')
+          .replace('{m}', moved).replace('{d}', removed).replace('{k}', kept),
+          'success');
       } else {
         notify(t('plan.applied', '已合并：复制 {m} 个格式，删除 {d} 条重复记录')
           .replace('{m}', moved).replace('{d}', removed), 'success');
@@ -1041,11 +1194,24 @@
       state.active = null;
       state.plan = null;
       if (done !== null) delete state.groupCache[done];
-      // 该组已只剩一本 → 后端 /groups 会把它摘掉，整表刷新一次
-      loadGroups();
+      // 该组已只剩一本 → 后端 /groups 会把它摘掉；只合并了一部分时它还在，
+      // 那就把它重新展开，好接着处理剩下那几本（"一组做一半"是 0.1.5 的常态）
+      loadGroups().then(function () {
+        if (done !== null && kept) reopenRow(done);
+      });
     }).catch(function () {
       if (button) button.disabled = false;
       notify(t('plan.applyFailed', '合并失败'), 'error');
+    });
+  }
+
+  /** 部分合并之后重新展开同一组（行还在才展开——剩不足两本时列表已把它摘掉）。 */
+  function reopenRow(index) {
+    if (!el.groups.querySelector('.bd-group[data-group="' + index + '"]')) return;
+    api('group?index=' + index).then(function (resp) {
+      if (!resp || resp.err !== 'ok') return;      // 静默：列表本身已经刷新过了
+      state.groupCache[index] = resp.data.group;
+      setActive(index, resp.data.group);
     });
   }
 

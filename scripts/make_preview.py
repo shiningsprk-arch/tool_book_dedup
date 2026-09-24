@@ -49,7 +49,17 @@ def build_data():
     os.makedirs(blob_dir)
 
     injected = smoke_offline._inject_duplicates(api, 10)
-    for position, (source_id, clone_id) in enumerate(injected):
+    # 再给第一本挂**第三个**副本：0.1.5 的核心场景是"只合并其中两本、第三本保持原样"，
+    # 全是两本一组的话，预览里演练不出"没勾的那本原样保留"（2 本里不勾 1 本 = 无事可做）。
+    extra_source = injected[0][0]
+    extra = dict(api.calibre._books[extra_source])
+    extra['id'] = max(api.calibre._books) + 1
+    extra['title'] = '%s（修订版）' % extra['title']
+    extra['available_formats'] = ['EPUB', 'AZW3']
+    extra.pop('_paths', None)
+    api.calibre._books[extra['id']] = extra
+
+    for position, clone_id in enumerate([cid for _src, cid in injected] + [extra['id']]):
         # 注意要拿**书库里那份**对象：`_inject_duplicates` 存的是浅拷贝，
         # 改它返回的中间变量不会影响 `all_book_ids()` 读到的记录
         clone = api.calibre._books[clone_id]
@@ -152,13 +162,79 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
 
   function summary() { return DATA.index ? DATA.index.summary : {}; }
 
+  /** 已经不在书库的成员（合并掉的 + 单独删掉的）——与 write_ops.gone_ids 同义。 */
+  function goneIds() {
+    return DATA.merged.map(function (m) { return m.id; })
+      .concat(DATA.deleted.map(function (d) { return d.id; }));
+  }
+
+  function remainingMembers(group) {
+    var gone = goneIds();
+    return (group.members || []).filter(function (id) { return gone.indexOf(id) < 0; });
+  }
+
+  /** 与 driver 的 `member_titles` 同序：扣掉已消失的成员重算行标题与两个字节数
+   * （旧索引里没有这些字段就跳过）。真后端在 `tool._live_row_fields` 里做同一件事。 */
+  function applyLiveRow(row, group, gone) {
+    var titles = group.member_titles || [];
+    var authors = group.member_authors || [];
+    var sizes = group.member_sizes || [];
+    var formats = group.member_formats || [];
+    if (!titles.length || titles.length !== (group.members || []).length) return;
+    var liveTitles = [], liveAuthors = [], live = [];
+    (group.members || []).forEach(function (id, position) {
+      if (gone.indexOf(id) >= 0) return;
+      liveTitles.push(titles[position]);
+      liveAuthors.push(authors[position] || '');
+      live.push({ id: id, size: sizes[position] || 0, formats: formats[position] || [] });
+    });
+    row.titles = liveTitles.slice(0, 2);
+    row.authors = liveAuthors.slice(0, 2);
+    row.member_count = liveTitles.length;
+    row.preview_truncated = liveTitles.length > 2;
+    var keeperId = group.keeper_id;
+    var keeperLive = live.some(function (m) { return m.id === keeperId; });
+    if (keeperLive) {
+      var keeperFormats = (formats[(group.members || []).indexOf(keeperId)] || []);
+      row.reclaimable_bytes = live.reduce(function (sum, m) {
+        return sum + (m.id === keeperId ? 0 : m.size);
+      }, 0);
+      row.disk_waste_bytes = live.reduce(function (sum, m) {
+        if (m.id === keeperId || !m.formats.length) return sum;
+        var subset = m.formats.every(function (f) { return keeperFormats.indexOf(f) >= 0; });
+        return sum + (subset ? m.size : 0);
+      }, 0);
+    }
+  }
+
+  /** 对照表的裁剪版：真后端拿活着的成员**重建**（`diff.build_table`），预览这边没有引擎，
+   * 只按 id 扣掉已消失成员那一格。形状一致；差别只是"重算后变相同的行会被折进 shared"，
+   * 预览里可能仍留着一行空的差异——不影响要验的界面接线。 */
+  function filterDiff(table, live) {
+    if (!table) return table;
+    var keep = live.map(function (m) { return m.id; });
+    var rows = [];
+    (table.rows || []).forEach(function (row) {
+      var cells = (row.cells || []).filter(function (c) { return keep.indexOf(c.book_id) >= 0; });
+      if (cells.length < 2) return;
+      var copy = {};
+      Object.keys(row).forEach(function (key) { copy[key] = row[key]; });
+      copy.cells = cells;
+      if (keep.indexOf(copy.best_id) < 0) copy.best_id = null;
+      rows.push(copy);
+    });
+    var out = {};
+    Object.keys(table).forEach(function (key) { out[key] = table[key]; });
+    out.rows = rows;
+    return out;
+  }
+
   window.__previewApi = function (name, params) {
     params = params || {};
     if (!DATA.report) {
       return ready.then(function () { return window.__previewApi(name, params); });
     }
-    var mergedIds = DATA.merged.map(function (m) { return m.id; })
-      .concat(DATA.deleted.map(function (d) { return d.id; }));
+    var mergedIds = goneIds();
 
     if (name === 'scope') {
       return Promise.resolve({ err: 'ok', data: {
@@ -179,8 +255,17 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       } });
     }
     if (name === 'groups') {
+      // 与 tool.GroupsHandler 一致：按**剩余成员**够不够两本摘组，并扣掉已消失的成员
+      // 重算行标题（预览里也得这样，否则"只合并了一部分"之后这一行的书名是假的）
       var groups = DATA.index.groups.filter(function (g) {
-        return !(g.members || []).some(function (id) { return mergedIds.indexOf(id) >= 0; });
+        return remainingMembers(g).length >= 2;
+      }).map(function (g) {
+        var row = {};
+        Object.keys(g).forEach(function (key) { row[key] = g[key]; });
+        var gone = (g.members || []).filter(function (id) { return mergedIds.indexOf(id) >= 0; });
+        row.stale_count = gone.length;
+        if (gone.length) applyLiveRow(row, g, gone);
+        return row;
       });
       if (params.confidence) {
         var wanted = params.confidence.split(',');
@@ -194,19 +279,40 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         scanned_books: DATA.index.scanned_books,
         filtered_total: groups.length, page: page,
         groups: groups.slice(page * size, page * size + size),
-        merged_ids: mergedIds,
+        gone_ids: mergedIds,
         removed_titles: DATA.merged.map(function (m) {
           return { id: m.id, title: m.title, into: m.into, at: m.at };
         }),
         deleted_titles: DATA.deleted.map(function (d) {
           return { id: d.id, title: d.title, at: d.at };
         }),
+        failed_titles: [],
       } });
     }
     if (name === 'group') {
       var position = parseInt(params.index, 10);
       var group = DATA.report.groups[position];
       if (!group) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
+      var live = [];
+      (group.members || []).forEach(function (m) {
+        if (mergedIds.indexOf(m.id) < 0) live.push(m);
+      });
+      if (live.length !== (group.members || []).length) {
+        // 成员变过 → 换成存活成员（推荐保留项若已被删掉，回落到第一本），
+        // 并**一起裁对照表**：否则表头 2 列、每行 3 格
+        var copy = {};
+        Object.keys(group).forEach(function (key) { copy[key] = group[key]; });
+        copy.members = live;
+        copy.member_count = live.length;
+        copy.diff = filterDiff(group.diff, live);
+        var keeper = group.recommendation && group.recommendation.keeper_id;
+        var stillThere = live.some(function (m) { return m.id === keeper; });
+        copy.recommendation = stillThere ? group.recommendation : {
+          keeper_id: live.length ? live[0].id : 0,
+          reasons: [{ code: 'manual' }], protected: [], rule: 'manual',
+        };
+        group = copy;
+      }
       return Promise.resolve({ err: 'ok', data: { task_id: 7, group: group, gone_ids: mergedIds } });
     }
     if (name === 'merge_plan') {
@@ -216,8 +322,20 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       var keeperId = parseInt(params.keeper_id, 10) || target.recommendation.keeper_id;
       var keeper = null;
       target.members.forEach(function (m) { if (m.id === keeperId) keeper = m; });
+      // 勾选集：缺省 = 除保留项外全部；显式给了就以给的为准（与 write_ops._parse_ids 同语义）
+      var picked = params.source_ids === undefined || params.source_ids === null
+        ? null
+        : String(params.source_ids).split(',').map(function (text) { return parseInt(text, 10); })
+            .filter(function (id) { return !isNaN(id); });
       var keeperFormats = (keeper.formats || []).map(function (f) { return f.toUpperCase(); });
-      var steps = target.members.filter(function (m) { return m.id !== keeperId; }).map(function (m) {
+      var chosen = target.members.filter(function (m) {
+        if (m.id === keeperId) return false;
+        return picked === null || picked.indexOf(m.id) >= 0;
+      });
+      var keptMembers = target.members.filter(function (m) {
+        return m.id !== keeperId && chosen.indexOf(m) < 0;
+      });
+      var steps = chosen.map(function (m) {
         var formats = (m.formats || []).map(function (f) { return f.toUpperCase(); });
         return {
           source_id: m.id, source_title: m.title, target_id: keeperId,
@@ -226,13 +344,23 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
           size: m.size,
         };
       });
+      var movingBytes = chosen.reduce(function (n, m) { return n + (m.size || 0); }, 0);
+      var wasteBytes = chosen.reduce(function (n, m) {
+        var formats = (m.formats || []).map(function (f) { return f.toUpperCase(); });
+        var subset = formats.every(function (f) { return keeperFormats.indexOf(f) >= 0; });
+        return n + (subset && formats.length ? (m.size || 0) : 0);
+      }, 0);
       return Promise.resolve({ err: 'ok', data: {
         index: pos, keeper_id: keeperId, keeper_title: keeper.title,
         keeper_formats: keeperFormats, steps: steps,
+        source_ids: steps.map(function (s) { return s.source_id; }),
+        kept: keptMembers.map(function (m) {
+          return { id: m.id, title: m.title, formats: m.formats || [], size: m.size || 0 };
+        }),
         moved_total: steps.reduce(function (n, s) { return n + s.moved_formats.length; }, 0),
         dropped_total: steps.reduce(function (n, s) { return n + s.dropped_formats.length; }, 0),
-        reclaimable_bytes: target.reclaimable_bytes,
-        disk_waste_bytes: target.disk_waste_bytes,
+        reclaimable_bytes: movingBytes,
+        disk_waste_bytes: wasteBytes,
         warnings: ['working_formats_dropped', 'source_records_not_migrated'],
         members: target.members, recommendation: target.recommendation,
       } });
@@ -255,11 +383,19 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       return Promise.resolve({ err: 'ok', data: { deleted_id: want, title: found.title } });
     }
     if (name === 'merge') {
-      // 回的形状必须与 tool.MergeHandler 一致（含 moved_total / removed_ids）——
+      // 回的形状必须与 tool.MergeHandler 一致（含 moved_total / removed_ids / kept）——
       // 少了字段界面上会显示 undefined，那会把真问题掩盖掉
       var target = DATA.report.groups[parseInt(params.index, 10)];
       var keeperId = parseInt(params.keeper_id, 10) || (target && target.recommendation.keeper_id);
-      var sources = target ? target.members.filter(function (m) { return m.id !== keeperId; }) : [];
+      var all = target ? target.members.filter(function (m) { return m.id !== keeperId; }) : [];
+      var picked = params.source_ids === undefined || params.source_ids === null
+        ? null
+        : params.source_ids.map(function (id) { return parseInt(id, 10); });
+      var sources = picked === null
+        ? all
+        : all.filter(function (m) { return picked.indexOf(m.id) >= 0; });
+      var kept = all.filter(function (m) { return sources.indexOf(m) < 0; })
+        .map(function (m) { return { id: m.id, title: m.title, formats: m.formats || [], size: m.size || 0 }; });
       var keeper = null;
       if (target) target.members.forEach(function (k) { if (k.id === keeperId) keeper = k; });
       var keeperFormats = keeper ? (keeper.formats || []).map(function (f) { return f.toUpperCase(); }) : [];
@@ -285,6 +421,7 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         moved_total: moved,
         dropped_total: 0,
         removed_ids: doDelete ? sources.map(function (m) { return m.id; }) : [],
+        kept: kept,
         steps: [], failed: 0,
         warnings: ['source_records_not_migrated'],
       } });

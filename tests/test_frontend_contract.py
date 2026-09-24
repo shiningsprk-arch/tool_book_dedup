@@ -207,10 +207,79 @@ class TestFrontendWiring(unittest.TestCase):
             self.assertIn("'%s'" % kind, self.js, '没处理 kind=%s' % kind)
         self.assertIn("t('diff.shared'", self.js)
 
-    def test_delete_source_defaults_to_unchecked(self):
-        """**回归（review P1）**：删除是不可逆的，默认值不该是破坏性的那一个。"""
-        self.assertIn('data-delete-source>', self.js)
-        self.assertNotIn('data-delete-source checked>', self.js)
+    def test_delete_source_defaults_to_checked(self):
+        """**判据在 0.1.5 反转了**：删除记录现在默认勾上。
+
+        0.1.4 时"默认不勾"是对的——那时点"确认合并"意味着整组除保留项外全删，这一击里
+        没有"要删哪几本"的信息。0.1.5 起用户逐本勾出要合并掉的书，**勾选本身就是同意**；
+        再叠一个默认关闭的"要不要真删"，漏掉的后果也不是"什么都没做"：格式被复制过去、
+        源记录还在，磁盘反而多占一份，重复记录下次扫描照样报出来。
+        所以默认指向"合并掉"，安全性改由文案承担（数量 + 用户数据警示 + 回收站提示）。
+        """
+        self.assertIn('data-delete-source checked>', self.js)
+        self.assertIn("t('plan.deleteSourceCount'", self.js)
+        self.assertIn("t('plan.trashHint'", self.js)
+
+    def test_selection_drives_plan_and_merge(self):
+        """逐本勾选：勾选集要同时进预览与执行，且换选择要作废旧预览。"""
+        self.assertIn('data-src="', self.js)
+        self.assertIn('data-select-all', self.js)
+        self.assertIn('data-select-none', self.js)
+        # 预览与执行都必须带上勾选集（否则预览显示的书与真正被合并的书会不一致）
+        self.assertIn("'&source_ids=' + ids.join(',')", self.js)
+        self.assertIn('source_ids: ids', self.js)
+        match = re.search(r'function toggleSelected\(bookId, checked\) \{(.*?)\n  \}',
+                          self.js, re.S)
+        self.assertIsNotNone(match, '找不到 toggleSelected 的定义')
+        self.assertIn('invalidatePlan()', match.group(1))
+        self.assertIn('refreshDrawer()', match.group(1))
+
+    def test_keeper_card_has_no_checkbox(self):
+        """保留项那张卡不许有复选框：它是合并的目标，没法"被合并掉"。"""
+        match = re.search(r'var pick = isKeeper \? \'\' :(.*?);\n', self.js, re.S)
+        self.assertIsNotNone(match, '找不到卡片的勾选框生成处')
+        self.assertIn('data-src=', match.group(1))
+        # 换保留项时：新保留项从勾选集里摘掉，被换下来的那本补勾
+        pick = re.search(r'function pickKeeper\(bookId\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIn('selected[bookId] = false', pick.group(1))
+        self.assertIn('selected[previous] = true', pick.group(1))
+
+    def test_plan_shows_kept_and_user_data_warning(self):
+        """没勾的那几本要如实说"没动"，勾了要删的带用户数据时要提醒。"""
+        self.assertIn('keptLineHtml(plan)', self.js)
+        self.assertIn('userDataWarnHtml(plan)', self.js)
+        self.assertIn("t('plan.userDataWarn'", self.js)
+        # 数据取自计划里的成员（报告形状本来就带 rating/tags/comments_present），
+        # 不许为此再加一次书库查询
+        self.assertIn('comments_present', self.js)
+
+    def test_partial_merge_reopens_the_group(self):
+        """部分合并之后这一组还在 → 重新展开接着处理，而不是收起。"""
+        self.assertIn('reopenRow(', self.js)
+        match = re.search(r'function reopenRow\(index\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIn('setActive(', match.group(1))
+        # 已经摘掉的组不展开（剩不足两本时列表里已经没有这一行）
+        self.assertIn('querySelector', match.group(1))
+
+    def test_stale_row_marks_handled_members(self):
+        """只合并了一部分之后，行里要标"已处理 n 本"（书名已由后端按存活成员重算）。"""
+        self.assertIn('group.stale_count', self.js)
+        self.assertIn("t('list.staleHandled'", self.js)
+
+    def test_diff_cells_align_to_members_by_id(self):
+        """**回归（0.1.5 浏览器实测）**：对照表逐列按 book_id 对齐，不按位置塞。
+
+        只合并了一部分成员之后再打开该组，后端若仍送来整组的旧表格，
+        `row.cells.map()` 会把三个数字排在两个书名下面——用户看到的是**错位的信息**
+        （某本书的体积显示在另一本名下）。所以列必须由 `members` 驱动、按 id 取格。
+        """
+        match = re.search(r'function diffTableHtml\(diff, members, keeper\) \{(.*?)\n  \}',
+                          self.js, re.S)
+        self.assertIsNotNone(match, '找不到 diffTableHtml 的定义')
+        body = match.group(1)
+        self.assertIn('members.map(', body)
+        self.assertIn('byId[member.id]', body)
+        self.assertNotIn('(row.cells || []).map(', body)
 
     def test_no_absolute_api_paths(self):
         """工具接口必须走桥（相对路径）；唯一例外是本地预览的兜底分支。

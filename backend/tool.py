@@ -23,10 +23,14 @@ Handler，宿主 toolbox_manager 把它们挂到：
 **写操作只有两处**：`/merge`（先复制格式、再删源记录）与 `/delete`（单删一本）。
 两者都只接受"分组序号 + book_id"，成员由服务端回**本次扫描的索引**核对，不接受前端
 传成员列表；执行前还会确认保留项现在还在书库（报告是跨重启持久化的，可能是几天前扫的）。
+0.1.5 起 `/merge` 与 `/merge_plan` 多一个 `source_ids`（用户勾选"要合并掉"的那几本），
+它同样要逐个回到这一组当前的成员里核对——**勾选不是"传 id 列表就能删书"的口子**。
 
 已知限制（刻意写在代码里，不假装没这回事）：同名格式不会被复制；被删掉的那本书上的
 用户数据会被宿主的级联清理一并删除（上游 issue #82 的修复），**不是迁移到保留项上**。
-前端在合并预览与删除确认里都必须写明这两点。
+前端在合并预览与删除确认里都必须写明这两点。删掉的书**本身**可以在宿主的「回收站」里
+恢复（calibre 删除默认进 `<书库>/.caltrash`，不是永久删除），但上面那些应用侧数据
+恢复不回来——文案要分开说，别写成笼统的"不可逆"。
 """
 import json
 import logging
@@ -41,6 +45,8 @@ from webserver.services.background_service import BackgroundService, BackgroundT
 from webserver.toolbox.base_tool import BaseTool
 
 from . import driver, write_ops
+from .dedup import diff as diff_mod
+from .dedup import keeper as keeper_mod
 from .dedup import report as report_mod
 
 # 单次扫描最多覆盖的书本数（与 driver 的上限一致）
@@ -71,7 +77,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.4',
+            'revision': '0.1.5',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -394,11 +400,7 @@ class GroupsHandler(BaseHandler):
         groups = list(index.get('groups') or [])
         # 已经不在书库的成员（合并掉的 + 单独删掉的）：留在列表里会引导用户再点一次，
         # 拿它们去合并还会撞上"来源书籍不存在"。一组不足两本也就不必再处理。
-        gone = write_ops.gone_ids(work_dir)
-        groups = [g for g in groups
-                  if len(set(g.get('members') or []) - gone) >= 2]
-        for group in groups:
-            group['gone_count'] = len(set(group.get('members') or []) & gone)
+        groups = _visible_groups(groups, write_ops.gone_ids(work_dir))
 
         confidence = self.get_argument('confidence', None)
         if confidence:
@@ -436,6 +438,69 @@ class GroupsHandler(BaseHandler):
                 'failed_titles': write_ops.read_failed_titles(work_dir),
             },
         }
+
+
+def _visible_groups(groups, gone):
+    """列表要显示的行：摘掉"剩下的不够两本"的组，并按存活成员重算行标题。
+
+    :param groups: 索引里的组（`driver.read_index()` 的 `groups`）
+    :param gone:   已经不在书库的成员 id（`write_ops.gone_ids()`）
+    """
+    rows = []
+    for group in groups:
+        member_ids = list(group.get('members') or [])
+        if len(set(member_ids) - gone) < 2:
+            continue
+        row = dict(group)
+        stale = len(set(member_ids) & gone)
+        row['stale_count'] = stale
+        if stale:
+            # 行标题是扫描时写进索引的：只合并了一部分成员之后，它还会显示已经被
+            # 删掉的书名。0.1.5 起"一组做一半"是常态，必须扣掉重算。
+            row.update(_live_row_fields(group, gone))
+        rows.append(row)
+    return rows
+
+
+def _live_row_fields(group, gone):
+    """按"还在书库的成员"重算这一行的标题预览、成员数与两个字节数；旧索引原样返回空。
+
+    行标题取自扫描时写死的索引（`driver.write_index` 的 `titles`），只有前
+    `PREVIEW_TITLES` 个、也不含存活信息。0.1.5 允许只勾选其中几本合并，于是
+    "一组做一半"成为常态——不重算的话，这一行会继续写着已经删掉的书名，
+    "可回收/同格式重占"也会把已经删掉的那几本算进去。
+    """
+    member_ids = list(group.get('members') or [])
+    titles = group.get('member_titles') or []
+    authors = group.get('member_authors') or []
+    sizes = group.get('member_sizes') or []
+    formats = group.get('member_formats') or []
+    if not titles or len(titles) != len(member_ids):
+        return {}
+    live_titles, live_authors, live = [], [], []
+    for position, book_id in enumerate(member_ids):
+        if book_id in gone:
+            continue
+        live_titles.append(titles[position])
+        live_authors.append(authors[position] if position < len(authors) else '')
+        live.append({
+            'id': book_id,
+            'title': titles[position],
+            'size': sizes[position] if position < len(sizes) else 0,
+            'formats': formats[position] if position < len(formats) else [],
+        })
+    fields = {
+        'titles': live_titles[:driver.PREVIEW_TITLES],
+        'authors': live_authors[:driver.PREVIEW_TITLES],
+        'member_count': len(live_titles),
+        'preview_truncated': len(live_titles) > driver.PREVIEW_TITLES,
+    }
+    keeper_id = group.get('keeper_id')
+    if keeper_id in [item['id'] for item in live]:
+        # 保留项还在 → 两个字节数按活着的成员重算（定义见 keeper.py）
+        fields['reclaimable_bytes'] = keeper_mod.reclaimable_bytes(live, keeper_id)
+        fields['disk_waste_bytes'] = keeper_mod.duplicate_disk_waste(live, keeper_id)
+    return fields
 
 
 def _group_texts(work_dir):
@@ -484,13 +549,22 @@ class GroupHandler(BaseHandler):
             # 成员变过（有成员被合并或删掉）或用户换了保留规则 → 重算推荐，不能沿用旧结论
             group = dict(group)
             group['members'] = members
+            group['member_count'] = len(members)
             group['recommendation'] = write_ops.recommend_for_members(members, keep_rule)
+            # **对照表也要按活着的成员重算**：它是扫描时按当时那批成员算的，
+            # 滤掉成员之后表头会比每行的单元格少一格——用户看到的是
+            # "三个数字排在两个书名下面"（0.1.5 起"只合并一部分"是常态，很容易撞上）。
+            group['diff'] = diff_mod.build_table(write_ops.to_diff_members(members))
         return {'err': 'ok', 'data': {
             'task_id': resolved, 'group': group, 'gone_ids': sorted(gone)}}
 
 
 class MergePlanHandler(BaseHandler):
-    """GET /merge_plan —— 合并预览：只算不写，把"会丢什么"摆清楚。"""
+    """GET /merge_plan —— 合并预览：只算不写，把"会丢什么"摆清楚。
+
+    参数：`index`（必填）、`keeper_id`、`keep_rule`、`source_ids`（逗号分隔的 id，
+    用户勾选"要合并掉"的那几本；不传 = 除保留项外全部）、`task_id`。
+    """
 
     @js
     @is_admin
@@ -507,7 +581,8 @@ class MergePlanHandler(BaseHandler):
             tool.api_proxy(), work_dir, index_arg,
             keeper_id=self.get_argument('keeper_id', None),
             keep_rule=self.get_argument('keep_rule', None),
-            task_id=self.get_argument('task_id', None))
+            task_id=self.get_argument('task_id', None),
+            source_ids=self.get_argument('source_ids', None))
         if error:
             return error
         return {'err': 'ok', 'data': plan}
@@ -516,10 +591,14 @@ class MergePlanHandler(BaseHandler):
 class MergeHandler(BaseHandler):
     """POST /merge —— 执行合并（写操作之一）。
 
-    请求体：``{"index": 3, "keeper_id": 12, "task_id": 7, "delete_source": true}``
+    请求体：``{"index": 3, "keeper_id": 12, "task_id": 7, "delete_source": true,
+    "source_ids": [14, 15]}``
 
     `index` 是本次扫描里的分组序号；服务端会用它把成员 id 与那次扫描**绑定**，
     不接受前端直接传成员列表——否则一个被篡改/过期的列表会去删没被查出来的书。
+    `source_ids` 是用户勾选"要合并掉"的那几本，同样要逐个回到这一组当前的成员里核对：
+    **勾选不是"传 id 就能删书"的口子**。字段缺省 = 除保留项外全部（0.1.4 的行为），
+    显式空数组 = 一本都不并（错误），不会被当成"全部"。
 
     部分失败也是"成功"返回（`err=ok`），但 `data.failed` 会如实给出失败条数，
     失败明细落进记账（`/groups` 回 `failed_titles`）——界面必须显示出来。
@@ -545,7 +624,8 @@ class MergeHandler(BaseHandler):
             tool.api_proxy(), work_dir, index_arg,
             keeper_id=payload.get('keeper_id'),
             keep_rule=payload.get('keep_rule'),
-            task_id=payload.get('task_id'))
+            task_id=payload.get('task_id'),
+            source_ids=payload.get('source_ids'))
         if error:
             return error
 

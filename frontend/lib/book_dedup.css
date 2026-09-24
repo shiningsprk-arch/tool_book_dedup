@@ -198,6 +198,7 @@
 .bd-chip-weak { color: var(--mb-color-warning); }
 .bd-chip-certain { color: var(--mb-color-success); }
 .bd-chip-keep { color: var(--mb-color-primary); }
+.bd-chip-stale { color: var(--mb-color-text-secondary); }
 
 .bd-group-caret {
   color: var(--mb-color-text-secondary);
@@ -284,6 +285,30 @@
 }
 
 .bd-copy-keeper { border-color: var(--mb-color-primary); }
+
+/* 勾了"一并合并"的那几张卡：一眼看出这一组准备动哪几本 */
+.bd-copy-on { border-color: var(--mb-color-primary); box-shadow: inset 0 0 0 1px var(--mb-color-primary); }
+
+.bd-copy-pick {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 组级：勾选计数 + 全选 / 全不选 */
+.bd-select-all {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+
+.bd-select-all .bd-hint { margin: 0; flex: 1 1 auto; }
 
 .bd-copy-head {
   display: flex;

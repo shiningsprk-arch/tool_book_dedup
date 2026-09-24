@@ -6,17 +6,28 @@
 1. **成员来自本次扫描，不接受前端传 id 列表。** `/merge`、`/delete` 都只收一个分组序号，
    服务端自己回到那次扫描的索引里取成员——否则一个被篡改或过期的列表就能去删
    没被查出来的书。
+   （0.1.5 的 `source_ids`——用户勾选要合并掉的那几本——**不是**这条规矩的例外：
+   每个 id 仍要回到这一组当前的成员里核对，超出集合一律拒绝。）
 2. **保留项必须在成员里**，且必须是本次扫描算出的成员之一。
 3. **先预览再执行**：`build_plan()` 与 `execute()` 用同一份计划，预览里已经列明
    哪些格式会被复制、哪些同格式会被丢弃。
 4. **执行后记账**：合并掉的 id 写进 `merged.json`、单独删掉的写进 `deleted.json`，
    列表与会话据此把它们摘掉——两种操作都是真的从书库删记录，留在列表里会引导用户再点一次。
+   没勾选的那些也一并记进 `kept`：它们还在书库里，记账里必须留着，否则事后看台账会
+   以为这一组已经处理干净。
 
 关于"被删掉的那本书里的用户数据"：宿主侧的删除会**级联清理**关联数据（收藏/在读/
 阅读进度/时长/评分/书评/共读记录/书单关联，见上游 PoxenStudio/mybooks#82 的修复
 commit a33f0c26，新增的 `webserver/base/book_data_cascade.py`）。但那是**删除不是迁移**
 ——被删那一本上的进度不会搬到保留项上。界面文案必须说清这一点，不能让人以为合并会把
 阅读进度一起带过来。
+
+关于"删错了能不能捞回来"：**书本身能**。工具的删除走 `api.calibre.delete_book` →
+`base_tool.delete_book_by_id` → `self.db.delete_book(book_id)`，而 calibre 的签名是
+`delete_book(..., permanent=False, ...)`：文件被**搬进** `<书库>/.caltrash`，宿主的
+「回收站」页（`/api/admin/trash/books/restore`）能按原 book_id 连元数据一起恢复，
+保留窗口是 calibre 的 14 天过期时间。**捞不回来的是上面那段级联清掉的应用侧数据**。
+所以文案写的应该是这个区别，而不是笼统的"删除不可逆"（0.1.4 那样写过，不准确）。
 """
 import json
 import logging
@@ -300,12 +311,60 @@ def _current_members(work_dir, index_arg, gone=None):
     return members, None
 
 
+def _parse_ids(value):
+    """解析"要合并哪几本"的勾选集。
+
+    **`None` 与 `[]` 必须分开**：
+    ``None`` = 前端没传这个字段（沿用 0.1.4 的行为：除保留项外全部）；
+    ``[]``   = 一本都没勾（什么都不做）。把后者当成前者，前端一次状态丢失就会
+    静悄悄把整组并掉——这是本函数存在的全部理由。
+
+    :raises ValueError: 值不是整数 / 整数列表（含 `True` 这类 bool——它在 Python 里
+        是 int，JSON 里的 `true` 会被当成 id=1）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError('bool is not a book id')
+    if isinstance(value, int):
+        raw = [value]
+    elif isinstance(value, str):
+        raw = value.split(',')
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        raise ValueError('unsupported source_ids type')
+
+    ids = []
+    for item in raw:
+        if isinstance(item, bool):
+            raise ValueError('bool is not a book id')
+        if isinstance(item, int):
+            ids.append(item)
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        ids.append(int(text))       # 非数字在这里抛 ValueError，由调用方转成 params.invalid
+    return ids
+
+
 def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
-               task_id=None):
-    """合并预览：只算不写。返回 (plan, error)。"""
+               task_id=None, source_ids=None):
+    """合并预览：只算不写。返回 (plan, error)。
+
+    :param source_ids: 用户勾选"要合并掉"的成员 id；``None`` = 除保留项外全部。
+        **仍然只信"分组序号 + 本次扫描的成员"**：每个勾选的 id 都要回到这一组当前的
+        成员里核对，不接受前端直接给一个 id 列表去删任意书（本模块开头那条规矩）。
+    """
     members, error = _current_members(work_dir, index_arg)
     if error:
         return None, error
+
+    try:
+        selected = _parse_ids(source_ids)
+    except ValueError:
+        return None, {'err': 'params.invalid', 'msg': 'source_ids 必须是整数列表'}
 
     recommendation = recommend_for_members(members, keep_rule)
     resolved_keeper = recommendation['keeper_id']
@@ -323,6 +382,20 @@ def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
         recommendation['reasons'] = [{'code': 'manual'}]
         recommendation['rule'] = 'manual'
 
+    member_ids = [m.get('id') for m in members]
+    if selected is not None:
+        foreign = [book_id for book_id in selected if book_id not in member_ids]
+        if foreign:
+            return None, {'err': 'source.not_in_group',
+                          'msg': '这些书不属于这一组：%s'
+                                 % '、'.join(str(i) for i in foreign)}
+        if resolved_keeper in selected:
+            return None, {'err': 'source.is_keeper',
+                          'msg': '保留项不能同时作为要合并掉的那一本'}
+        selected = [book_id for book_id in selected if book_id != resolved_keeper]
+        if not selected:
+            return None, {'err': 'merge.nothing', 'msg': '没有勾选任何要合并的书'}
+
     # 保留项必须**现在**还在书库。报告是跨重启持久化的，可能几天前扫的；期间用户很可能
     # 正是在工具卡片上点"打开书籍页"把它删了/并了。这一步以前没有，后果是
     # `merge_formats` 抛"目标书籍不存在"被当成"无需合并"，然后把源记录删光。
@@ -334,13 +407,17 @@ def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
         return None, {'err': 'keeper.missing',
                       'msg': '保留项已不在书库（可能已在别处被删除或合并），请重新扫描'}
 
-    plan = driver.merge_plan(api, _to_engine_members(members), resolved_keeper)
+    plan = driver.merge_plan(api, _to_engine_members(members), resolved_keeper,
+                             source_ids=selected)
     if plan.get('error'):
         return None, {'err': plan['error'], 'msg': '保留项不在成员里'}
     plan['index'] = int(index_arg)
     plan['task_id'] = None if task_id in (None, '') else str(task_id)
     plan['recommendation'] = recommendation
     plan['members'] = members
+    # 实际会合并掉的 id（勾选口径；缺省时就是"除保留项外全部"）。
+    # 回给前端的是**将发生的事**，不是它送来的那一串——前端据此把计划与勾选态对齐。
+    plan['source_ids'] = [step['source_id'] for step in plan['steps']]
     return plan, None
 
 
@@ -358,6 +435,16 @@ def _to_engine_members(members):
             '_meta_score': member.get('meta_score') or 0,
         })
     return adapted
+
+
+def to_diff_members(members):
+    """报告形状的成员 → 对照表（`diff.build_table`）要的形状。
+
+    报告的成员字段几乎就是对照表的口径（它本来就由 `report.build_member` 按同一批字段裁的），
+    **只差一个键名**：报告里叫 `meta_score`，对照表读 `_meta_score`。少了这一手，
+    "元数据"整行会全变 0，被当成"两份相同"折叠掉。
+    """
+    return [dict(member, _meta_score=member.get('meta_score') or 0) for member in members]
 
 
 def execute(api, work_dir, plan, delete_source=True):
@@ -410,10 +497,14 @@ def _execute(api, work_dir, plan, delete_source=True):
         'removed': removed,
         'steps': results,
         'delete_source': bool(delete_source),
+        # 用户**没勾**的那些（原样保留）。记账里也要有：否则事后只看这份台账，
+        # 会以为这一组已经处理干净了
+        'kept': plan.get('kept') or [],
     }
     append_merged(work_dir, entry)
 
     failed = [r for r in results if r.get('error')]
+    kept = plan.get('kept') or []
     data = {
         'keeper_id': keeper_id,
         'keeper_title': plan.get('keeper_title') or '',
@@ -421,6 +512,7 @@ def _execute(api, work_dir, plan, delete_source=True):
         'steps': results,
         'moved_total': sum(len(r['moved_formats']) for r in results),
         'dropped_total': plan.get('dropped_total', 0),
+        'kept': kept,
         'failed': len(failed),
         'warnings': ['source_records_not_migrated'],
     }
