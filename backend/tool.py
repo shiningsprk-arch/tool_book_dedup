@@ -80,7 +80,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.7',
+            'revision': '0.1.8',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -232,6 +232,13 @@ class BookDedupTool(BaseTool):
             driver.write_report(work_dir, built)
             driver.write_index(work_dir, built)
             driver.write_latest_marker(cls.shared_dir(), task_id, built)
+            # 报告目录保留策略：只留最近 `driver.KEEP_REPORTS` 份（默认 5）。**放在最后**——
+            # 这时本次报告已经在盘上，它一定是最新的那份、不会被自己删掉；再把 work_dir
+            # 显式列为 protect 兜一层。清理失败只记日志，绝不影响这次扫描的结果。
+            try:
+                driver.prune_reports(cls.shared_dir(), protect=work_dir)
+            except Exception as err:  # noqa: BLE001
+                logging.warning('[book_dedup] prune_reports failed: %s', err)
             summary = built.get('summary') or {}
             tool.update_task_progress(
                 task_id, 100,

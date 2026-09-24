@@ -1690,6 +1690,140 @@ class TestHandlers(unittest.TestCase):
         self.assertEqual(undefined, [], '有未定义的名字：\n%s' % '\n'.join(undefined))
 
 
+class TestReportRetention(unittest.TestCase):
+    """报告目录保留策略：只留最近 N 份（默认 `driver.KEEP_REPORTS` = 5）。
+
+    一次扫描一个目录（真书库上约 3.6MB），而删除是不可逆的——所以判据必须是
+    "自己写出来的目录"（含 `report.json`），共享目录里的文件一律不碰，
+    当前这次的目录永远保留。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_retention_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_retention_shared_')
+        self.driver = self._driver()
+
+    def _driver(self):
+        """只借 driver 模块（不需要假宿主也能测：这一层是纯路径 + 文件操作）。"""
+        modules, _fake = _install_fake_webserver(self.tmp, FakeApi(make_books()))
+        spec = importlib.util.spec_from_file_location(
+            PKG_NAME + '_retention', os.path.join(BACKEND, '__init__.py'),
+            submodule_search_locations=[BACKEND])
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[PKG_NAME + '_retention'] = package
+        spec.loader.exec_module(package)
+        return importlib.import_module(PKG_NAME + '_retention.driver')
+
+    def _make_report_dir(self, task_id, when):
+        """造一份"扫描目录"：目录名学宿主的 md5 规则，里面放一个 report.json。"""
+        import hashlib
+        name = hashlib.md5(('task-%s' % task_id).encode()).hexdigest()[:16]
+        work_dir = os.path.join(self.shared, name)
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, 'report.json'), 'w', encoding='utf-8') as handle:
+            handle.write('{"groups": []}')
+        os.utime(os.path.join(work_dir, 'report.json'), (when, when))
+        return work_dir
+
+    def test_keeps_only_the_newest_n(self):
+        dirs = [self._make_report_dir(i, 1_700_000_000 + i) for i in range(1, 9)]
+        pruned = self.driver.prune_reports(self.shared, keep=5)
+        self.assertEqual(len(pruned), 3)                       # 8 - 5
+        left = self.driver.report_dirs(self.shared)
+        self.assertEqual(len(left), 5)
+        self.assertEqual(left[0], dirs[-1])                    # 最新那份还在
+        for path in dirs[:3]:
+            self.assertFalse(os.path.exists(path), '旧目录没被删：%s' % path)
+        for path in dirs[3:]:
+            self.assertTrue(os.path.exists(path), '该保留的目录被删了：%s' % path)
+
+    def test_default_keep_is_five(self):
+        self.assertEqual(self.driver.KEEP_REPORTS, 5)
+        for i in range(1, 8):
+            self._make_report_dir(i, 1_700_000_000 + i)
+        self.driver.prune_reports(self.shared)                 # 不传 keep → 用默认值
+        self.assertEqual(len(self.driver.report_dirs(self.shared)), 5)
+
+    def test_protected_dir_survives_even_when_old(self):
+        dirs = [self._make_report_dir(i, 1_700_000_000 + i) for i in range(1, 8)]
+        pruned = self.driver.prune_reports(self.shared, keep=2, protect=dirs[0])
+        self.assertNotIn(dirs[0], pruned)
+        self.assertTrue(os.path.exists(dirs[0]))
+        self.assertEqual(len(self.driver.report_dirs(self.shared)), 3)   # 2 + 被保护的
+
+    def test_shared_files_and_foreign_dirs_are_untouched(self):
+        for i in range(1, 5):
+            self._make_report_dir(i, 1_700_000_000 + i)
+        # 共享目录里的文件（latest.json / ignored.json）
+        marker = os.path.join(self.shared, 'latest.json')
+        with open(marker, 'w', encoding='utf-8') as handle:
+            handle.write('{}')
+        # 别人放的目录（没有 report.json）与随手放的文件：不许碰
+        foreign_dir = os.path.join(self.shared, 'someone-elses-dir')
+        os.makedirs(foreign_dir, exist_ok=True)
+        foreign_file = os.path.join(self.shared, 'notes.txt')
+        with open(foreign_file, 'w', encoding='utf-8') as handle:
+            handle.write('x')
+
+        self.driver.prune_reports(self.shared, keep=1)
+        self.assertTrue(os.path.exists(marker))
+        self.assertTrue(os.path.exists(foreign_dir))
+        self.assertTrue(os.path.exists(foreign_file))
+
+    def test_keep_is_at_least_one(self):
+        for i in range(1, 4):
+            self._make_report_dir(i, 1_700_000_000 + i)
+        self.driver.prune_reports(self.shared, keep=0)
+        self.assertEqual(len(self.driver.report_dirs(self.shared)), 1)
+
+    def test_scan_prunes_through_the_worker(self):
+        """真扫描（走 `/start` 的后台线程）跑完就要顺手清理——策略挂在扫描里才有效。
+
+        刻意**不覆盖** `shared_work_dir`：真宿主里"共享目录"就是报告目录的父目录
+        （`get_work_dir()` 无 key 那级），覆盖成别的路径会让这条断言落空——
+        那是假宿主的偏差，不是工具的行为。
+        """
+        FakeBackgroundService._tasks = {}
+        tmp = tempfile.mkdtemp(prefix='book_dedup_retention_w_')
+        api = FakeApi(make_books())
+        tool, driver, _write_ops = load_tool(tmp, api)
+        tool.BookDedupTool._last_task_id = None
+        tool.BookDedupTool._accepted = False
+        shared = tool.BookDedupTool.shared_dir()
+
+        # 先造 6 份"历史报告"（比默认保留数多一份）
+        for i in range(1, 7):
+            self._make_report_dir_like(tool.BookDedupTool.report_dir(1000 + i),
+                                       1_700_000_000 + i)
+        self.assertEqual(len(driver.report_dirs(shared)), 6)
+
+        handler = tool.StartHandler()
+        handler.get_argument = lambda key, default=None: default
+        handler.request = types.SimpleNamespace(body=json.dumps({}).encode('utf-8'))
+        loop = asyncio.new_event_loop()
+        started = loop.run_until_complete(handler.post())
+        loop.close()
+        self.assertEqual(started['err'], 'ok', started)
+
+        deadline = time.time() + 10
+        while tool.BookDedupTool.is_running() and time.time() < deadline:
+            time.sleep(0.05)
+
+        left = driver.report_dirs(shared)
+        self.assertEqual(len(left), driver.KEEP_REPORTS)
+        current = tool.BookDedupTool.report_dir(started['data']['task_id'])
+        self.assertIn(os.path.abspath(current), [os.path.abspath(p) for p in left])
+        self.assertEqual(left[0], current, '最新那份应该排在第一位')
+
+    def _make_report_dir_like(self, work_dir, when):
+        os.makedirs(work_dir, exist_ok=True)
+        path = os.path.join(work_dir, 'report.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('{"groups": []}')
+        os.utime(path, (when, when))
+        return work_dir
+
+
 class TestWritePathGuard(unittest.TestCase):
     """守门：整个工具只有 merge.py 允许调用删/改书库的方法。"""
 

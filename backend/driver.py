@@ -14,6 +14,7 @@
 import json
 import logging
 import os
+import shutil
 import threading
 
 from .dedup import cluster, ignore as ignore_mod, keeper, metadata, report
@@ -375,6 +376,10 @@ LATEST_MARKER = 'latest.json'
 # 存进索引而不是让前端去读报告：`/groups` 只读索引，几 KB 的代价换"列表直接可读"。
 PREVIEW_TITLES = 2
 
+# 报告目录保留份数：一次扫描一个目录（真书库 24,835 本时约 3.6MB：报告 3.0 + 索引 0.6），
+# 保留策略是**只留最近五份**。要改份数就改这一个常量（`prune_reports` 的 `keep` 默认取它）。
+KEEP_REPORTS = 5
+
 # 报告解析缓存。报告是 MB 级，而 `/group`（每点一行）与 `/groups` 的关键字筛选都要
 # **整份解析**一遍：135 组点下来就是 135 次 `json.load`，非常明显。按
 # `(路径, mtime_ns, 大小)` 认版本，只留最后一份，避免无界内存。
@@ -552,6 +557,74 @@ def read_latest_marker(shared_dir):
             return json.load(handle)
     except (OSError, ValueError):
         return None
+
+
+# --------------------------------------------------------------------------- 报告目录保留
+
+def report_dirs(shared_dir):
+    """共享目录下的报告目录（按"最近一次扫描"从新到旧排序）。
+
+    **只认自己写出来的目录**：必须是共享目录的直接子目录，且里面有 `report.json`
+    （`write_report` 的产物）。这样即便用户在 `/data/toolbox/book_dedup/` 下放了别的东西，
+    也不会被当成垃圾清掉——删除是不可逆的，判据必须只认自己的标记文件。
+    """
+    root = os.path.abspath(shared_dir)
+    found = []
+    try:
+        names = os.listdir(root)
+    except OSError as err:
+        logging.warning('[book_dedup] cannot list %s: %s', root, err)
+        return []
+    for name in names:
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        report = os.path.join(path, REPORT_FILENAME)
+        if not os.path.isfile(report):
+            continue
+        # 共享目录自己的 md5 子目录之外，任何符号链接/越界路径都不碰
+        if os.path.dirname(os.path.abspath(path)) != root:
+            continue
+        try:
+            stamp = os.path.getmtime(report)
+        except OSError:
+            stamp = 0.0
+        found.append((stamp, path))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [path for _stamp, path in found]
+
+
+def prune_reports(shared_dir, keep=KEEP_REPORTS, protect=None):
+    """只保留最近的 `keep` 份报告目录，其余删掉（默认 5 份）。
+
+    为什么要有它：一次扫描留一个目录（真书库上约 3.6MB），而工具从不删——跑几十次就是
+    上百 MB，且没人会去手清。保留的是"最近几次查重"，够用来对照；更早的只有历史价值。
+
+    **删除是不可逆的，所以判据写得比别处死**：
+    1. 只删 `report_dirs()` 认出来的目录（共享目录的直接子目录 + 含 `report.json`）；
+    2. 共享目录里的文件（`latest.json`、`ignored.json`）一律不碰；
+    3. `protect`（当前这次的报告目录）永远不删，哪怕它排在第 6 位；
+    4. `keep` 至少按 1 处理。
+
+    :return: 被删掉的目录路径列表（供日志与测试核对）
+    """
+    keep = max(1, int(keep))
+    protected = os.path.abspath(protect) if protect else None
+    dirs = report_dirs(shared_dir)
+    doomed = []
+    for path in dirs[keep:]:
+        if protected and os.path.abspath(path) == protected:
+            continue
+        doomed.append(path)
+    for path in doomed:
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+            logging.info('[book_dedup] pruned old report dir: %s', path)
+        except Exception as err:  # noqa: BLE001
+            logging.warning('[book_dedup] cannot prune %s: %s', path, err)
+    if doomed:
+        logging.info('[book_dedup] report dirs kept=%d pruned=%d', keep, len(doomed))
+    return doomed
 
 
 def marker_matches(marker, task_id, report):

@@ -315,6 +315,28 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIsNotNone(match, '找不到 rerender 的定义')
         self.assertIn('renderIgnored()', match.group(1))
 
+    def test_new_result_drops_index_keyed_state(self):
+        """**回归（0.1.8）**：换了结果就要丢掉按"组序号"缓存的东西。
+
+        组序号只是报告里的位置：重新查重之后同一个序号是另一组。以前 `groupCache`
+        与 `state.active` 都不失效，`toggleRow()` 命中缓存就直接渲染 → 行标题是新的、
+        抽屉里的成员与对照表还是上一次扫描的。后端一直在回 `signature`
+        （生成时间 + 组数）就是为了这个，前端此前从没读过。
+        """
+        self.assertIn('data.signature', self.js)
+        match = re.search(r'function dropStaleResult\(signature\) \{(.*?)\n  \}',
+                          self.js, re.S)
+        self.assertIsNotNone(match, '找不到 dropStaleResult 的定义')
+        body = match.group(1)
+        # 空 signature（旧报告/索引缺失）不许清缓存——宁可多留一次，也别抖掉用户正开着的那行
+        self.assertIn('if (!signature', body)
+        self.assertIn('state.groupCache = {}', body)
+        self.assertIn('state.active = null', body)
+        # 必须在 loadGroups 里真的被调用（定义了不调等于没修）
+        groups_body = re.search(r'function loadGroups\(\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIsNotNone(groups_body)
+        self.assertIn('dropStaleResult(data.signature)', groups_body.group(1))
+
     def test_no_absolute_api_paths(self):
         """工具接口必须走桥（相对路径）；唯一例外是本地预览的兜底分支。
 

@@ -22,9 +22,9 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 
 ```bash
 # Windows
-certutil -hashfile book_dedup-0.1.7.zip SHA256
+certutil -hashfile book_dedup-0.1.8.zip SHA256
 # Linux / macOS
-sha256sum book_dedup-0.1.7.zip
+sha256sum book_dedup-0.1.8.zip
 ```
 
 sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
@@ -33,7 +33,7 @@ sha256 与 Release 说明里的一致即可。**从源码重打也能得到同�
 ```bash
 git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
 cd tool_book_dedup
-python scripts/build.py            # → dist/book_dedup-0.1.7.zip，并打印 sha256
+python scripts/build.py            # → dist/book_dedup-0.1.8.zip，并打印 sha256
 ```
 
 ## 怎么用
@@ -89,6 +89,23 @@ python scripts/build.py            # → dist/book_dedup-0.1.7.zip，并打印 s
 - **应用侧数据捡不回来**：宿主删除时会级联清掉这本书记的 收藏 / 在读 / 阅读进度 / 时长 /
   评分 / 书评 / 共读记录 / 书单归属，回收站恢复**不会**把它们带回来。
   （0.1.4 及以前的文案写的是笼统的"删除不可逆"，不准确，0.1.5 改正。）
+
+## 报告目录与磁盘占用
+
+每次查重都会在工作目录下新开一份报告（`TOOL_DATA_ROOT/book_dedup/<hash>/`），里面是
+`report.json` + `index.json` + 这次的记账文件。**默认只保留最近 5 份**
+（`driver.KEEP_REPORTS`），扫描跑完顺手把更早的清掉——真书库（24,835 本）一份约 3.6 MB
+（报告 3.0 + 索引 0.6），不清理的话跑几十次就是上百 MB。清理只认"自己写出来的目录"
+（共享目录的直接子目录 + 含 `report.json`），共享目录里的 `latest.json` / `ignored.json`
+一律不碰，当前这份永远保留（传 `protect` 兜底）。
+
+关于「本次已处理」面板：
+
+- 它读的是**当前这份报告**的记账，所以**重新查重之后会变空**——不是删掉了什么，
+  而是换了一份报告、旧的那份不再被读（在保留期内仍留在磁盘上）。
+- 处理过的书本身不会因为重扫回来：那是真的从书库里删了。
+- **忽略名单跨扫描保留**（`ignored.json` 存在共享目录），重新查重后忽略照样生效。
+- 宿主重启不算重新扫描：`/progress` 会认回上次那份报告，那时面板**还在**。
 
 ## 判定规则
 
@@ -188,7 +205,7 @@ python scripts/build.py            # → dist/book_dedup-0.1.7.zip，并打印 s
 ## 开发
 
 ```bash
-# 单测（纯引擎 81 + 假宿主 80 + 前端契约 27 = 188 项；不需要 MyBooks / calibre）
+# 单测（纯引擎 81 + 假宿主 86 + 前端契约 28 = 195 项；不需要 MyBooks / calibre）
 python tests/test_dedup_core.py
 python tests/test_fake_host.py
 python tests/test_frontend_contract.py

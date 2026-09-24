@@ -111,6 +111,7 @@
     scopeData: null,     // 书库规模等（供语言切换后重算提示）
     scopeMessage: '',    // 读取失败/恢复失败时的提示文案
     generatedAt: '',     // 报告生成时间（语言切换后重画列表要用）
+    signature: '',       // 当前这份报告的身份（生成时间+组数）；变了就丢掉按序号缓存的状态
     scan: null,          // 最近一次扫描的汇总
     page: 0,
     pageSize: 50,
@@ -463,6 +464,25 @@
 
   // ---------------------------------------------------------------- 列表
 
+  /** 结果换了（`signature` = 生成时间 + 组数）就丢掉与"这一份报告"绑定的状态。
+
+  缓存的是**组序号 → 详情**，而序号只是报告里的位置：同一序号在新报告里是另一组。
+  以前重扫之后点之前点过的行，命中的是旧缓存（`toggleRow` 直接渲染、不再请求），
+  于是行标题是新的、抽屉内容是旧的。空 signature（旧报告/索引缺失）按"不知道"处理，
+  不清缓存——宁可多留一次缓存，也不要因为字段缺失把用户正开着的那一行抖掉。
+  */
+  function dropStaleResult(signature) {
+    if (!signature || signature === state.signature) return false;
+    var changed = !!state.signature;
+    state.signature = signature;
+    if (!changed) return true;          // 第一次拿到结果：只记下来
+    state.groupCache = {};
+    state.active = null;
+    state.plan = null;
+    state.confirmDelete = null;
+    return true;
+  }
+
   function loadGroups() {
     var query = ['page=' + state.page, 'size=' + state.pageSize];
     if (state.confidence) query.push('confidence=' + encodeURIComponent(state.confidence));
@@ -474,6 +494,11 @@
         return;
       }
       var data = resp.data;
+      // **换了一份结果就必须把按"组序号"缓存的东西清掉**：组序号是报告里的位置，
+      // 新报告里同一个序号是另一组。不清的话，重新查重之后点一个之前点过的行，
+      // 行标题是新的、抽屉里的成员与对照表却来自上一次扫描（后端一直在回
+      // `signature` 就是为了这个，只是以前没人读它）。
+      dropStaleResult(data.signature);
       state.groups = data.groups || [];
       state.filteredTotal = data.filtered_total || 0;
       state.removedTitles = data.removed_titles || [];

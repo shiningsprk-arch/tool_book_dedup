@@ -146,7 +146,8 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
  */
 (function (window) {
   'use strict';
-  var DATA = { report: null, index: null, merged: [], deleted: [], ignored: [] };
+  var DATA = { report: null, index: null, merged: [], deleted: [], ignored: [],
+               generated_at: '', rescans: 0, scanning: false };
   var failing = [];
 
   // 数据没就绪时的调用**挂起等待**，而不是立刻回错。
@@ -161,6 +162,11 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
   });
 
   function summary() { return DATA.index ? DATA.index.summary : {}; }
+
+  /** 与 write_ops.report_signature 同口径：生成时间 + 组数。 */
+  function signature() {
+    return (DATA.generated_at || DATA.index.generated_at) + '|' + DATA.index.groups.length;
+  }
 
   /** 已经不在书库的成员（合并掉的 + 单独删掉的）——与 write_ops.gone_ids 同义。 */
   function goneIds() {
@@ -271,7 +277,35 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         keep_rules: ['metadata', 'formats', 'size', 'oldest', 'newest'],
       } });
     }
+    if (name === 'start') {
+      DATA.scanning = true;
+      return Promise.resolve({ err: 'ok', data: { task_id: 7 } });
+    }
+    if (name === 'cancel') {
+      DATA.scanning = false;
+      return Promise.resolve({ err: 'ok', msg: '已请求取消' });
+    }
     if (name === 'progress') {
+      if (DATA.scanning) {
+        // 模拟"重新查重跑完"：**换一份结果**。真扫描当然会重算，这里用"整体轮转一位"
+        // 来制造"同一个组序号指向了另一组"——正是 `signature` 要拦的那种变化。
+        // 预览里必须能演示它，否则"重扫后点旧行看到旧内容"这类 bug 在这张页面上看不见。
+        DATA.scanning = false;
+        DATA.rescans += 1;
+        DATA.generated_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        var shift = function (list) {
+          return list.length > 1 ? list.slice(1).concat([list[0]]) : list;
+        };
+        // **必须重新编号**：真后端 `write_index()` 写的就是 `'index': position`，
+        // 行标题、`/group?index=`、`/merge` 全靠这一个字段对齐。只轮转数组而不重编号，
+        // 第 N 行会去取第 N+1 组——那是预览脚手架自己造的假故障。
+        var renumber = function (list) {
+          list.forEach(function (group, position) { group.index = position; });
+          return list;
+        };
+        DATA.index.groups = renumber(shift(DATA.index.groups));
+        DATA.report.groups = renumber(shift(DATA.report.groups));
+      }
       return Promise.resolve({ err: 'ok', data: {
         status: 'completed', progress: 100, restored: true, task_id: 7,
         progress_data: { phase: 'done', summary: summary(),
@@ -303,7 +337,8 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       var size = parseInt(params.size || '50', 10);
       var page = parseInt(params.page || '0', 10);
       return Promise.resolve({ err: 'ok', data: {
-        task_id: 7, generated_at: DATA.index.generated_at,
+        task_id: 7, generated_at: DATA.generated_at || DATA.index.generated_at,
+        signature: signature(),
         threshold: DATA.index.threshold, summary: summary(), stats: DATA.index.stats,
         scanned_books: DATA.index.scanned_books,
         filtered_total: groups.length, page: page,
