@@ -4,9 +4,6 @@ import time
 
 from . import diff as diff_mod
 from . import keeper as keeper_mod
-from .cluster import REASON_RANK
-from .metadata import score as meta_score
-
 # 报告里每条成员记录向外暴露的字段——刻意收窄，避免把整份数据字典塞进报告文件。
 # （注意：简介只带 `comments_present` 这个布尔，正文不进报告——报告会被整份读进内存。）
 _MEMBER_FIELDS = (

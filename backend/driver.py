@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import threading
-import time
 
 from .dedup import cluster, ignore as ignore_mod, keeper, metadata, report
 

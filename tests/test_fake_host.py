@@ -12,11 +12,14 @@
 
 运行：python tests/test_fake_host.py
 """
+import asyncio
 import importlib.util
+import io as _io
 import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 
@@ -53,7 +56,23 @@ class FakeBackgroundService(object):
     STATUS_FAILED = 'failed'
 
     def get_task(self, task_id):
-        return FakeBackgroundService._tasks.get(task_id)
+        """**返回 dict**，与真宿主一致（`background_service.py:290` 的 `task.to_dict()`）。
+
+        以前这里返回 FakeTask 对象，于是 tool.py 里 `(task or {}).get('status')` 这类取值
+        在假宿主里必然 AttributeError——`/start` 之后那条读路径（`is_running()`、
+        `get_last_task()`、`/progress`）**在本地根本走不到**，用户真机上出的错也就漏掉了。
+        """
+        task = FakeBackgroundService._tasks.get(task_id)
+        if task is None:
+            return None
+        return {
+            'id': task.id,
+            'task_id': task.task_id,
+            'status': task.status,
+            'progress': task.progress,
+            'progress_data': task.progress_data,
+            'error_message': task.error_message,
+        }
 
 
 class FakeAsyncService(object):
@@ -69,7 +88,16 @@ class FakeAsyncService(object):
     _singleton = None
 
     def __init__(self, calibre_db=None):
-        self.db = calibre_db
+        # 真宿主里 `AsyncService()` 拿到的是那个**已经 setup 过**的单例；这里直接 new
+        # 会得到 db=None，于是后台线程（`run_scan` 里 `tool.db = AsyncService().db`）
+        # 读库就崩——"扫描"这条路此前在假宿主里走不通，等于没测。
+        # 不递归：`instance()` 会带 calibre_db 调进来，走上面那一支。
+        if calibre_db is not None:
+            self.db = calibre_db
+        else:
+            singleton = FakeAsyncService.__dict__.get('_singleton')
+            self.db = getattr(singleton, 'db', None)
+        self.session = None
 
     def setup(self, calibre_db=None, scoped_session=None, need_check_db=False):
         self.db = calibre_db
@@ -230,6 +258,10 @@ def _install_fake_webserver(tmp_root, library_api):
     module('webserver.services.background_service',
            BackgroundService=FakeBackgroundService, BackgroundTask=FakeTask)
     module('webserver.toolbox')
+    # `AsyncService` 是宿主里的单例（`instance()` 会缓存）：每个用例都必须换一份新的，
+    # 否则 `api_proxy()` 注入的 db 会指向上一个用例的 FakeApi——前一个用例删过书的话，
+    # 后面用例读到的就是"少一本的书库"（症状：total_books 4 != 5，且完全看不出原因）。
+    FakeAsyncService._singleton = None
     FakeAsyncService.library = library_api
     module('webserver.toolbox.base_tool', BaseTool=FakeTool)
     return modules, FakeTool
@@ -302,6 +334,17 @@ class FakeApi(object):
 
     def format_abspath(self, book_id, fmt, index_is_id=True):
         return self.calibre.format_abspath(book_id, fmt)
+
+    # --- 写操作：真宿主里 `core_api.CalibreAPI.delete_book` / `merge_formats` 会转到
+    # `self._owner.db.delete_book(...)` 与 `owner.merge_book_formats(...)`，而 `owner.db`
+    # 就是 calibre 的 **LibraryDatabase** —— `FakeApi` 站的就是那个位置，所以这两个方法
+    # 得挂在它身上。写路径经 `api_proxy()` 走的是 CoreAPI → owner.db 这条链，
+    # 与测试里直接调 `api.calibre.*` 不是同一条；handler 级用例（0.1.6 加的）才走到它。
+    def delete_book(self, book_id):
+        return self.calibre.delete_book(book_id)
+
+    def merge_formats(self, source_id, target_id):
+        return self.calibre.merge_formats(source_id, target_id)
 
 
 def load_tool(tmp_root, api, shared_root=None):
@@ -1441,6 +1484,210 @@ class TestTypeGate(unittest.TestCase):
         built = self.driver.run_scan(api, api.calibre.all_book_ids(), threshold=0.85)
         self.assertEqual(built['summary']['group_count'], 1)
         self.assertEqual(built['summary']['cross_type_excluded'], 0)
+
+
+class TestHandlers(unittest.TestCase):
+    """**真的把 handler 跑一遍**——只测辅助函数会漏掉 handler 自己的返回语句。
+
+    0.1.6 的 `/groups` 崩在 `'gone_ids': sorted(gone)`：重构时把 `gone = ...` 那行删了，
+    而当时所有测试都只调 `_visible_groups()`，没有一条执行到 handler 的返回字典。
+    用户真机上看到的是整个列表打不开（`NameError: name 'gone' is not defined`）。
+    这一组用例就是为了让这类错在本地就红：给 handler 喂请求参数、跑它的 get/post、
+    检查返回的字典。
+    """
+
+    def setUp(self):
+        FakeBackgroundService._tasks = {}
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_handler_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_handler_shared_')
+        self.api = FakeApi(make_books())
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
+        self.tool_class = self.tool.BookDedupTool
+        self.tool_class._last_task_id = None
+        self.tool_class._accepted = False
+        self.built, self.work_dir = scan(self.tool, self.driver, self.api)
+
+    def call(self, handler_cls, args=None, body=None):
+        """跑一次 handler：`body is None` 走 GET，否则走 POST（JSON 请求体）。"""
+        handler = handler_cls()
+        handler.get_argument = lambda key, default=None: (args or {}).get(key, default)
+        handler.request = types.SimpleNamespace(
+            body=json.dumps(body if body is not None else {}).encode('utf-8'))
+        coro = handler.post() if body is not None else handler.get()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def _members_of(self, position):
+        return self.write_ops.group_members(self.work_dir, position)[0]
+
+    def test_groups_handler_returns_a_full_payload(self):
+        """**回归（用户真机 NameError）**：`/groups` 返回字典里每个字段都要算得出来。"""
+        data = self.call(self.tool.GroupsHandler)['data']
+        for key in ('task_id', 'signature', 'generated_at', 'threshold', 'summary',
+                    'stats', 'scanned_books', 'filtered_total', 'page', 'groups',
+                    'gone_ids', 'removed_titles', 'deleted_titles', 'failed_titles'):
+            self.assertIn(key, data, '缺少字段 %s' % key)
+        self.assertEqual(data['filtered_total'], len(self.built['groups']))
+        self.assertEqual(data['gone_ids'], [])
+        for row in data['groups']:
+            self.assertIn('ignored_pairs', row)      # 0.1.6 新增的行字段
+
+    def test_groups_handler_filters_and_paginates(self):
+        data = self.call(self.tool.GroupsHandler,
+                         args={'confidence': 'strong', 'page': '0', 'size': '1'})['data']
+        self.assertEqual(len(data['groups']), 1)
+        self.assertEqual(data['groups'][0]['confidence'], 'strong')
+        data = self.call(self.tool.GroupsHandler, args={'keyword': '三体'})['data']
+        self.assertGreaterEqual(data['filtered_total'], 1)
+
+    def test_group_handler_returns_members_and_diff(self):
+        data = self.call(self.tool.GroupHandler, args={'index': '0'})['data']
+        group = data['group']
+        self.assertTrue(group['members'])
+        self.assertIn('ignored_pairs', group)
+        # 对照表的列数必须与成员数一致（0.1.5 的错列回归）
+        for row in group['diff']['rows']:
+            self.assertEqual(len(row['cells']), len(group['members']))
+        self.assertEqual(self.call(self.tool.GroupHandler,
+                                  args={'index': '999'})['err'], 'group.not_found')
+
+    def test_merge_plan_handler_accepts_source_ids(self):
+        position = 0
+        member_ids = [m['id'] for m in self._members_of(position)]
+        data = self.call(self.tool.MergePlanHandler,
+                         args={'index': str(position),
+                               'source_ids': str(member_ids[1])})['data']
+        self.assertEqual(data['source_ids'], [member_ids[1]])
+        self.assertEqual(len(data['steps']), 1)
+        error = self.call(self.tool.MergePlanHandler,
+                          args={'index': str(position), 'source_ids': '5'})
+        self.assertEqual(error['err'], 'source.not_in_group')
+
+    def test_ignore_handlers_round_trip(self):
+        """`/ignore` → `/ignored` → `/unignore` 三个 handler 连着跑一遍。"""
+        position = 0
+        result = self.call(self.tool.IgnoreHandler, body={'index': position})
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['added'], 1)
+
+        listed = self.call(self.tool.IgnoredHandler)['data']['ignored']
+        self.assertEqual(len(listed), 1)
+        self.assertTrue(listed[0]['a_title'])
+
+        # 忽略之后这一行不再出现在列表里
+        rows = self.call(self.tool.GroupsHandler)['data']['groups']
+        self.assertNotIn(position, [row['index'] for row in rows])
+
+        undone = self.call(self.tool.UnignoreHandler,
+                           body={'pairs': [[listed[0]['a'], listed[0]['b']]]})
+        self.assertEqual(undone['data']['removed'], 1)
+        self.assertEqual(self.call(self.tool.IgnoredHandler)['data']['ignored'], [])
+        rows = self.call(self.tool.GroupsHandler)['data']['groups']
+        self.assertIn(position, [row['index'] for row in rows])
+
+    def test_ignore_handler_rejects_foreign_ids(self):
+        """白名单是"少报"：构造出来的请求不许把任意两本写进去。"""
+        position = 0
+        member_ids = [m['id'] for m in self._members_of(position)]
+        error = self.call(self.tool.IgnoreHandler,
+                          body={'index': position, 'ids': [member_ids[0], 5]})
+        self.assertEqual(error['err'], 'book.not_in_group')
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+        error = self.call(self.tool.IgnoreHandler,
+                          body={'index': position, 'ids': [member_ids[0]]})
+        self.assertEqual(error['err'], 'params.invalid')
+
+    def test_merge_handler_runs_the_write_path(self):
+        """写路径走 handler（而不是直接调 write_ops）也要通。"""
+        position = 0
+        member_ids = [m['id'] for m in self._members_of(position)]
+        source = member_ids[1]
+        result = self.call(self.tool.MergeHandler,
+                           body={'index': position, 'source_ids': [source],
+                                 'delete_source': True})
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['removed_ids'], [source])
+        self.assertNotIn(source, self.api.calibre.books)
+
+    def test_delete_handler_runs_the_write_path(self):
+        position = 0
+        source = [m['id'] for m in self._members_of(position)][1]
+        result = self.call(self.tool.DeleteHandler,
+                           body={'index': position, 'book_id': source})
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['deleted_id'], source)
+
+    def test_scope_and_progress_handlers(self):
+        scope = self.call(self.tool.ScopeHandler)['data']
+        self.assertEqual(scope['total_books'], len(self.api.calibre.books))
+        progress = self.call(self.tool.ProgressHandler)['data']
+        self.assertIn(progress['status'], ('completed', 'running'))
+
+    def test_start_handler_runs_a_real_scan_then_groups(self):
+        """`/start` 走**真的后台线程与真的 run_scan**：那条路上的接线（忽略名单的读取与
+        失效剔除、报告/索引落盘、latest 标记）只有在 handler 里才连起来。
+
+        0.1.6 的 `/groups` NameError 就是"读路径的接线没人走"漏出来的，
+        所以这一条要一路走到 `/groups` 能列出组为止。
+        """
+        started = self.call(self.tool.StartHandler,
+                            body={'book_ids': [], 'threshold': 0.85})
+        self.assertEqual(started['err'], 'ok', started)
+        task_id = started['data']['task_id']
+
+        deadline = time.time() + 10
+        while self.tool_class.is_running() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(self.tool_class.is_running(), '扫描没有在 10s 内结束')
+
+        progress = self.call(self.tool.ProgressHandler)['data']
+        self.assertIn(progress['status'], ('completed', 'failed'))
+        self.assertEqual(progress['status'], 'completed', progress.get('error'))
+        self.assertGreaterEqual(progress['progress_data']['summary']['group_count'], 1)
+
+        rows = self.call(self.tool.GroupsHandler)['data']
+        self.assertGreaterEqual(rows['filtered_total'], 1)
+        self.assertEqual(rows['task_id'], task_id)
+
+    def test_start_handler_ignores_entries_are_pruned_on_scan(self):
+        """忽略名单里失效的条目要在**扫描时**（而不是只在直接调 driver 时）被剔掉。"""
+        position = 0
+        member_ids = [m['id'] for m in self._members_of(position)]
+        self.write_ops.add_ignored(self.shared, self._members_of(position))
+        del self.api.calibre.books[member_ids[1]]      # 书没了 → 这一条失效
+
+        self.call(self.tool.StartHandler, body={'book_ids': [], 'threshold': 0.85})
+        deadline = time.time() + 10
+        while self.tool_class.is_running() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_cancel_handler_without_a_task(self):
+        self.assertEqual(self.call(self.tool.CancelHandler, body={})['err'],
+                         'task.not_found')
+
+    def test_no_undefined_names_in_the_backend(self):
+        """**回归（用户真机 NameError）**：用 pyflakes 静态查一遍未定义名。
+
+        运行期测试只覆盖"跑到的那些行"，handler 的返回字典、异常分支很容易漏掉；
+        pyflakes 在本地就能把 `gone` 这类重构残留标出来。没装 pyflakes 时跳过
+        （明确 skip，不静默通过）。
+        """
+        try:
+            import pyflakes.api
+            import pyflakes.reporter
+        except ImportError:
+            self.skipTest('本机没有 pyflakes，跳过静态检查')
+        out, err = _io.StringIO(), _io.StringIO()
+        reporter = pyflakes.reporter.Reporter(out, err)
+        pyflakes.api.checkRecursive(
+            [os.path.join(ROOT, 'backend'), os.path.join(ROOT, 'scripts')], reporter)
+        undefined = [line for line in (out.getvalue() + err.getvalue()).splitlines()
+                     if 'undefined name' in line]
+        self.assertEqual(undefined, [], '有未定义的名字：\n%s' % '\n'.join(undefined))
 
 
 class TestWritePathGuard(unittest.TestCase):

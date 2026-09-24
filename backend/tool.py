@@ -37,7 +37,6 @@ Handler，宿主 toolbox_manager 把它们挂到：
 """
 import json
 import logging
-import os
 import threading
 from typing import Optional
 
@@ -81,7 +80,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.6',
+            'revision': '0.1.7',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -409,8 +408,9 @@ class GroupsHandler(BaseHandler):
         groups = list(index.get('groups') or [])
         # 已经不在书库的成员（合并掉的 + 单独删掉的）：留在列表里会引导用户再点一次，
         # 拿它们去合并还会撞上"来源书籍不存在"。一组不足两本也就不必再处理。
-        groups = _visible_groups(groups, write_ops.gone_ids(work_dir),
-                                 load_ignored_keys(tool))
+        # （`gone` 下面还要回给前端做 `gone_ids`，所以先取出来、别塞回调用里）
+        gone = write_ops.gone_ids(work_dir)
+        groups = _visible_groups(groups, gone, load_ignored_keys(tool))
 
         confidence = self.get_argument('confidence', None)
         if confidence:

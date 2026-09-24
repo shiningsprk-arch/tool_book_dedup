@@ -22,9 +22,9 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 
 ```bash
 # Windows
-certutil -hashfile book_dedup-0.1.6.zip SHA256
+certutil -hashfile book_dedup-0.1.7.zip SHA256
 # Linux / macOS
-sha256sum book_dedup-0.1.6.zip
+sha256sum book_dedup-0.1.7.zip
 ```
 
 sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
@@ -33,7 +33,7 @@ sha256 与 Release 说明里的一致即可。**从源码重打也能得到同�
 ```bash
 git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
 cd tool_book_dedup
-python scripts/build.py            # → dist/book_dedup-0.1.6.zip，并打印 sha256
+python scripts/build.py            # → dist/book_dedup-0.1.7.zip，并打印 sha256
 ```
 
 ## 怎么用
@@ -188,7 +188,7 @@ python scripts/build.py            # → dist/book_dedup-0.1.6.zip，并打印 s
 ## 开发
 
 ```bash
-# 单测（纯引擎 81 + 假宿主 67 + 前端契约 27 = 175 项；不需要 MyBooks / calibre）
+# 单测（纯引擎 81 + 假宿主 80 + 前端契约 27 = 188 项；不需要 MyBooks / calibre）
 python tests/test_dedup_core.py
 python tests/test_fake_host.py
 python tests/test_frontend_contract.py
