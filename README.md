@@ -108,7 +108,7 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 ## 开发
 
 ```bash
-# 单测（纯引擎 + 假宿主 + 前端契约，共 122 项；不需要 MyBooks / calibre）
+# 单测（纯引擎 + 假宿主 + 前端契约，共 126 项；不需要 MyBooks / calibre）
 python tests/test_dedup_core.py
 python tests/test_fake_host.py
 python tests/test_frontend_contract.py

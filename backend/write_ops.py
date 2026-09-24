@@ -21,6 +21,7 @@ commit a33f0c26，新增的 `webserver/base/book_data_cascade.py`）。但那是
 import json
 import logging
 import os
+import threading
 import time
 
 from . import driver
@@ -28,6 +29,15 @@ from .dedup import keeper as keeper_mod
 
 MERGED_FILENAME = 'merged.json'
 DELETED_FILENAME = 'deleted.json'
+
+# 写操作串行化。**两个用途**：
+#
+# 1. 记账是"读→改→写"，并发两次（双击确认、两个标签页）会丢一条记录——
+#    丢了记账意味着那本书仍留在列表里，再点合并就撞宿主报错。
+# 2. 同一组的两次合并同时跑，两边都先通过"还剩 ≥2 本"的检查，然后各自去删源记录。
+#
+# 一把进程内的锁就够：工具是单进程的，写操作本身也只有这两处。
+_WRITE_LOCK = threading.RLock()
 
 
 def keep_rules():
@@ -99,18 +109,19 @@ def read_failed_titles(work_dir):
 
 
 def append_merged(work_dir, entry):
-    entries = read_merged(work_dir)
-    entries.append(entry)
-    try:
-        os.makedirs(work_dir, exist_ok=True)
-        tmp = merged_path(work_dir) + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as handle:
-            json.dump(entries, handle, ensure_ascii=False)
-        os.replace(tmp, merged_path(work_dir))
-        return True
-    except OSError as err:
-        logging.error('[book_dedup] merged ledger not written: %s', err)
-        return False
+    with _WRITE_LOCK:
+        entries = read_merged(work_dir)
+        entries.append(entry)
+        try:
+            os.makedirs(work_dir, exist_ok=True)
+            tmp = merged_path(work_dir) + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(entries, handle, ensure_ascii=False)
+            os.replace(tmp, merged_path(work_dir))
+            return True
+        except OSError as err:
+            logging.error('[book_dedup] merged ledger not written: %s', err)
+            return False
 
 
 # --------------------------------------------------------------------------- 删除记账
@@ -148,18 +159,19 @@ def read_deleted_titles(work_dir):
 
 
 def append_deleted(work_dir, entry):
-    entries = read_deleted(work_dir)
-    entries.append(entry)
-    try:
-        os.makedirs(work_dir, exist_ok=True)
-        tmp = deleted_path(work_dir) + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as handle:
-            json.dump(entries, handle, ensure_ascii=False)
-        os.replace(tmp, deleted_path(work_dir))
-        return True
-    except OSError as err:
-        logging.error('[book_dedup] deleted ledger not written: %s', err)
-        return False
+    with _WRITE_LOCK:
+        entries = read_deleted(work_dir)
+        entries.append(entry)
+        try:
+            os.makedirs(work_dir, exist_ok=True)
+            tmp = deleted_path(work_dir) + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(entries, handle, ensure_ascii=False)
+            os.replace(tmp, deleted_path(work_dir))
+            return True
+        except OSError as err:
+            logging.error('[book_dedup] deleted ledger not written: %s', err)
+            return False
 
 
 def gone_ids(work_dir):
@@ -172,13 +184,19 @@ def gone_ids(work_dir):
 
 
 def execute_delete(api, work_dir, index_arg, book_id):
-    """单独删除一本重复书。**本工具的第二处写操作。**
+    """单独删除一本重复书（写操作，串行化）。
 
     守门与合并完全一致：只收分组序号 + 一个 book_id，且该 id 必须**是这一组当前的成员**
     ——不接受前端传任意 id，否则一个构造出来的请求就能删掉没被查出来的书。
 
     :return: ``{'err': 'ok', 'data': {...}}`` 或错误字典
     """
+    with _WRITE_LOCK:
+        return _execute_delete(api, work_dir, index_arg, book_id)
+
+
+def _execute_delete(api, work_dir, index_arg, book_id):
+    """`execute_delete` 的实现体（调用方持锁）。"""
     # 单删用 `_group_members`（不要求至少两本）：把一组删到只剩一本或删光都合法
     members, error = _group_members(work_dir, index_arg)
     if error:
@@ -336,7 +354,13 @@ def _to_engine_members(members):
 
 
 def execute(api, work_dir, plan, delete_source=True):
-    """按计划执行合并。返回 ``{'err': 'ok', 'data': {...}}`` 或错误字典。"""
+    """按计划执行合并（写操作，串行化）。返回 ``{'err': 'ok', 'data': {...}}`` 或错误字典。"""
+    with _WRITE_LOCK:
+        return _execute(api, work_dir, plan, delete_source)
+
+
+def _execute(api, work_dir, plan, delete_source=True):
+    """`execute` 的实现体（调用方持锁）。"""
     keeper_id = plan.get('keeper_id')
     steps = plan.get('steps') or []
     if not steps:

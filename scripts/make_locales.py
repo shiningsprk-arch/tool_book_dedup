@@ -119,6 +119,7 @@ ZH = {
     'diff.allSame': '两份的元数据与条目属性完全相同',
 
     'keep.metadata': '元数据最全',
+    'keep.withValue': '{text}（{value}）',
     'keep.formats': '格式最多',
     'keep.size': '体积最大',
     'keep.isbn': '有 ISBN',
@@ -270,6 +271,7 @@ EN = {
     'diff.allSame': 'Both copies have identical metadata and record attributes',
 
     'keep.metadata': 'Most complete metadata',
+    'keep.withValue': '{text} ({value})',
     'keep.formats': 'Most formats',
     'keep.size': 'Largest',
     'keep.isbn': 'Has ISBN',
@@ -421,6 +423,7 @@ ZH_TW = {
     'diff.allSame': '兩份的後設資料與條目屬性完全相同',
 
     'keep.metadata': '後設資料最完整',
+    'keep.withValue': '{text}（{value}）',
     'keep.formats': '格式最多',
     'keep.size': '體積最大',
     'keep.isbn': '有 ISBN',

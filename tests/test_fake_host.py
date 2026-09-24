@@ -956,6 +956,24 @@ class TestWritePathGuard(unittest.TestCase):
     WRITE_CALLS = ('delete_book', 'merge_formats', 'remove_formats', 'set_metadata',
                    'set_cover', 'import_book', 'import_file', 'add_format')
 
+    def test_write_operations_are_serialized(self):
+        """**回归（review P3）**：写操作与记账都必须持同一把锁。
+
+        记账是"读→改→写"，并发两次（双击确认、两个标签页）会丢一条记录——丢了记账，
+        那本已经删掉的书还会留在列表里，再点合并就撞宿主报错。同一组并发合并更糟：
+        两边都先通过"还剩 ≥2 本"的检查，然后各自去删源记录。
+        """
+        path = os.path.join(ROOT, 'backend', 'write_ops.py')
+        with open(path, 'r', encoding='utf-8') as handle:
+            source = handle.read()
+        self.assertIn('_WRITE_LOCK', source)
+        for name in ('def execute(', 'def execute_delete(',
+                     'def append_merged(', 'def append_deleted('):
+            index = source.index(name)
+            following = source.find('\ndef ', index + 1)
+            body = source[index:following if following > 0 else len(source)]
+            self.assertIn('with _WRITE_LOCK', body, '%s 没有持锁' % name)
+
     def _py_files(self):
         for folder in ('backend', 'backend/dedup'):
             directory = os.path.join(ROOT, folder)

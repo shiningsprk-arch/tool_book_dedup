@@ -284,7 +284,11 @@ def author_keys(authors):
 
 
 def media_family(fmt):
-    """格式 → 媒体家族。未知格式返回 'unknown'（不与任何东西组队）。"""
+    """格式 → 媒体家族。
+
+    未入库的格式归 'unknown'：两个 unknown 之间**算同一家族**（都认不出来，就按同类处理，
+    免得把显然是同一本书的两份漏掉）；但 unknown 与已知家族不重叠（`families_of` 取交集）。
+    """
     if not fmt:
         return 'unknown'
     normalized = str(fmt).strip().lower().lstrip('.')

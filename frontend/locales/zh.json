@@ -67,6 +67,7 @@
   "keep.oldest": "最早入库",
   "keep.protected": "带阅读数据",
   "keep.size": "体积最大",
+  "keep.withValue": "{text}（{value}）",
   "list.emptyClean": "没有发现重复书籍",
   "list.emptyFiltered": "当前筛选条件下没有结果",
   "list.failed": "读取列表失败",

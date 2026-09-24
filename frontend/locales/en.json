@@ -67,6 +67,7 @@
   "keep.oldest": "Added earliest",
   "keep.protected": "Carries reading data",
   "keep.size": "Largest",
+  "keep.withValue": "{text} ({value})",
   "list.emptyClean": "No duplicate books found",
   "list.emptyFiltered": "No groups match the current filter",
   "list.failed": "Could not read the list",

@@ -203,16 +203,15 @@
   function keeperReasonText(reason) {
     var key = KEEPER_REASON_KEYS[reason.code] || 'keep.added';
     var text = t(key, reason.code);
-    if (reason.code === 'metadata' && reason.score !== undefined) {
-      return text + '（' + reason.score + '）';
-    }
-    if (reason.code === 'formats' && reason.count !== undefined) {
-      return text + '（' + reason.count + '）';
-    }
-    if (reason.code === 'size' && reason.bytes !== undefined) {
-      return text + '（' + formatBytes(reason.bytes) + '）';
-    }
-    return text;
+    var detail = null;
+    if (reason.code === 'metadata' && reason.score !== undefined) detail = reason.score;
+    if (reason.code === 'formats' && reason.count !== undefined) detail = reason.count;
+    if (reason.code === 'size' && reason.bytes !== undefined) detail = formatBytes(reason.bytes);
+    if (detail === null) return text;
+    // 括号由文案提供：中文用全角、英文用半角（原来写死全角，英文下会显示
+    // "Most formats（2）"）
+    return t('keep.withValue', '{text}（{value}）')
+      .replace('{text}', text).replace('{value}', detail);
   }
 
   function escapeHtml(text) {
