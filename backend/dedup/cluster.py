@@ -11,13 +11,19 @@
 **性能约束是这个文件存在的主要理由**：宿主仓库自带 `tests/cases/big-metadata.db`
 是 24,835 本，两两比较是 3 亿次。所以候选生成不两两比，而是走"短路链"：
 
-    作者桶（倒排，O(n)）→ 桶内两两 → 标题 Dice 过阈值 → ISBN 弱命中可独立成对
+    作者桶（倒排，O(n)）→ 桶内两两 → 卷册序号排除 → 标题 Dice 过阈值 → ISBN 弱命中可独立成对
 
 作者不同的一对**根本不会进入标题比较**。中文个人书库作者字段常常为空，那类书会全部
-落进同一个"无作者"桶，桶内仍是两两——所以对超大桶设上限并记录被跳过量，宁可不比，
+落进同一个"无作者"桶（`''`），桶内仍是两两——所以对超大桶设上限并记录被跳过量，宁可不比，
 也不让一次扫描把服务拖住。
+
+**卷册序号排除**（`differs_only_by_serial`）是第二道闸：`德川家康（第一部）` 与
+`德川家康（第十二部）` 的主书名完全相同，不论阈值多高都会被算成 1.0，靠阈值是拦不住的，
+必须在配对前就把"只差一个卷号"的对剔掉。剔掉多少对会记进 `stats['skipped_serial']`，
+在报告里如实交代（不静默吞掉）。
 """
-from .normalize import families_of, isbn_key, title_core, title_key, author_keys
+from .normalize import (families_of, isbn_key, title_core, title_key, author_keys,
+                        differs_only_by_serial)
 from .similarity import SimilarityCache
 
 # 匹配理由 → 强度等级（数字越大越强）
@@ -79,6 +85,7 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
         'comparisons': 0,
         'skipped_buckets': 0,
         'skipped_books': 0,
+        'skipped_serial': 0,
         'max_bucket': max_bucket,
     }
     cache = SimilarityCache()
@@ -103,7 +110,10 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
     # --- 第二档：作者桶内比较标题
     buckets = {}
     for record in records:
-        for key in record.get('_author_keys') or ():
+        # 没有作者（或作者字段是空串）的书也要进桶：都落进同一个 "" 桶里比较，
+        # 而不是被排除在标题比较之外。这类书在个人书库里不少，漏掉就是整批漏掉。
+        # 桶上限（`max_bucket`）照样守着最坏情况：一个几千本的"无作者"桶会被跳过并记账。
+        for key in (record.get('_author_keys') or ('',)):
             buckets.setdefault(key, []).append(record)
 
     for members in buckets.values():
@@ -123,6 +133,10 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
                 right = members[j]
                 right_key = right.get('_title_key')
                 if not right_key:
+                    continue
+                if differs_only_by_serial(left_key, right_key):
+                    # 只差卷号/期号 → 同一套书的不同卷，不是重复。记账，别静默吞掉
+                    stats['skipped_serial'] += 1
                     continue
                 stats['comparisons'] += 1
                 score = cache.dice(left_key, right_key,

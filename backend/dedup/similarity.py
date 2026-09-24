@@ -13,9 +13,9 @@ jieba 宿主已有（`requirements.txt` 里就有），但它是"按词典切词
 多重集更贴近真实重合度。
 """
 from collections import Counter
-import re
 
-from .normalize import cjk_ratio, has_cjk
+from .normalize import (annotation_is_serial, cjk_ratio, differs_only_by_serial,
+                        has_cjk)
 
 
 def _ngrams(text, n):
@@ -47,6 +47,22 @@ def grams(text, n=None):
     return _ngrams(text, n)
 
 
+def _grams_for(text, n):
+    """`_ngrams` 的取用口，形状与缓存一致（见 `variant_score` 的 `gram_of`）。"""
+    return _ngrams(text, n)
+
+
+def shared_ngram_size(a_key, b_key):
+    """一次比较里**两侧共用**的 n：取各自语言的较小者。
+
+    这一点是必须的：`ngram_size_for` 是**逐串**判断语言的，而"中英混排"的两个串可能
+    各选一个 n（`哈利波特 Harry Potter` 的 CJK 占比 0.27 → n=3，`哈利波特` → n=2），
+    两套 n-gram 之间交集恒为空 → 相似度恒为 0.000，真正的重复永远查不出来。
+    共用一个 n 之后，分数才是"这两个书名差多少"的有意义回答。
+    """
+    return min(ngram_size_for(a_key), ngram_size_for(b_key))
+
+
 def dice_from_grams(a_grams, b_grams):
     """两个 n-gram 多重集的 Dice 系数，0.0~1.0。任一为空返回 0.0。"""
     if not a_grams or not b_grams:
@@ -59,23 +75,26 @@ def dice_from_grams(a_grams, b_grams):
 
 
 class SimilarityCache(object):
-    """按 key 缓存 n-gram，避免同一个串被反复切。
+    """一次扫描里的两级缓存：n-gram 切分结果 + 两两比较结果。
 
-    扫描时每本书的标题要与同作者桶里的其它书比较多次，切一次缓存起来即可；
-    25k 本的场景下这是主要的 CPU 节省点。
+    标题要与同一个作者桶里的其它书比较很多次，切分和比较都只该做一遍。
+    25k 本的场景下这是主要的 CPU 节省点（真书库实测 438,740 次比较）。
     """
 
     __slots__ = ('_cache', '_pairs')
 
     def __init__(self):
+        # (文本, n) → n-gram 多重集
         self._cache = {}
         # 同一对标题在一次扫描里可能被比较多次（多个共同作者），比较结果也缓存
         self._pairs = {}
 
-    def grams(self, key):
+    def grams(self, text, n):
+        """带缓存的 `_ngrams`——**必须连 n 一起做键**，否则两种 n 会互相污染。"""
+        key = (text, n)
         cached = self._cache.get(key)
         if cached is None:
-            cached = grams(key)
+            cached = _ngrams(text, n)
             self._cache[key] = cached
         return cached
 
@@ -88,7 +107,7 @@ class SimilarityCache(object):
         cache_key = (key_a, key_b, core_a or '', core_b or '')
         cached = self._pairs.get(cache_key)
         if cached is None:
-            cached = variant_score(key_a, key_b, core_a, core_b)
+            cached = variant_score(key_a, key_b, core_a, core_b, gram_of=self.grams)
             self._pairs[cache_key] = cached
             self._pairs[(key_b, key_a, core_b or '', core_a or '')] = cached
         return cached
@@ -121,37 +140,33 @@ def _squeeze(text):
     return ''.join(out)
 
 
-def _tokens(text):
-    """切成"有意义的单元"：含 CJK 用 bigram，否则按标点／空白切词。
-
-    token 是**允许直接比较相等**的单元，与 `grams()` 的多重集不同——后者用于算连续
-    相似度，前者用于回答"一个标题是不是另一个的变体"。
-    """
+def _bigrams(text):
+    """去叠字之后的 bigram 集合（用于包含度，见 `variant_score`）。"""
     if not text:
         return set()
-    if has_cjk(text) and cjk_ratio(text) >= 0.3:
-        if len(text) < 2:
-            return {text}
-        return set(text[i:i + 2] for i in range(len(text) - 1))
-    return set(part for part in re.split(r'\s+', text) if part)
+    squeezed = _squeeze(text)
+    if len(squeezed) < 2:
+        return {squeezed}
+    return set(squeezed[i:i + 2] for i in range(len(squeezed) - 1))
 
 
-def _token_similarity(a_tokens, b_tokens):
-    """两个 token 集合的 Dice。"""
-    if not a_tokens or not b_tokens:
-        return 0.0
-    return 2.0 * len(a_tokens & b_tokens) / float(len(a_tokens) + len(b_tokens))
-
-
-def _containment(a_tokens, b_tokens):
+def _containment(a_bigrams, b_bigrams):
     """较小集合被较大集合包住的比例。"""
-    if not a_tokens or not b_tokens:
+    if not a_bigrams or not b_bigrams:
         return 0.0
-    smaller, bigger = (a_tokens, b_tokens) if len(a_tokens) <= len(b_tokens) else (b_tokens, a_tokens)
+    smaller, bigger = ((a_bigrams, b_bigrams) if len(a_bigrams) <= len(b_bigrams)
+                       else (b_bigrams, a_bigrams))
     return len(smaller & bigger) / float(len(smaller))
 
 
-def variant_score(a_key, b_key, a_core=None, b_core=None):
+def _annotation_of(key, core):
+    """`title_core` 剥掉的那一截（尾部注记的归一化文本）；没剥过则返回 ''。"""
+    if not key or not core or not key.startswith(core):
+        return ''
+    return key[len(core):]
+
+
+def variant_score(a_key, b_key, a_core=None, b_core=None, gram_of=None):
     """标题相似度：取「完整标题」与「剥离尾部注记后的主书名」两个视角里的**较大**者。
 
     两个视角各自负责一件事：
@@ -163,27 +178,47 @@ def variant_score(a_key, b_key, a_core=None, b_core=None):
       完全相同 → 1.0。中文书库里"主标题相同 + 尾部注记不同"是最常见的重复形态，
       不单独看这个视角就会漏掉一批真重复。
 
-    剥离注记是有意的：如果剥离后的两本书其实不同（例如 `某书` 与 `某书(续集)` 都剥成
-    `某书`），那属于"看起来像同一本"，查重工具本来就该把它摆给用户判断——这不是
-    判定的终点，界面上的对照表与"保留哪本"才是。
+    **这道放行有两道闸**（不设的话真书库上 87% 的分组是"同系列不同卷"）：
+
+    1. `differs_only_by_serial`（外层）：两侧完整标题只差一个卷号/期号 → 直接 0
+    2. 注记里有数字/卷号（`annotation_is_serial`），或两个主书名之间也只差一个卷号
+       （`differs_only_by_serial(a_core, b_core)`）→ **不给主书名视角放行**
+
+    第 2 条是必须的：`侯海洋基层风云（第一部 发配牛背驼）` 与 `（第二部 巴山城管）`
+    的主书名都是"侯海洋基层风云"，只靠主书名比较必然给 1.0；
+    `苗疆蛊事（全集）`（主书名"苗疆蛊事"）与 `苗疆蛊事1` 之间也只差一个卷号——
+    少了这条，并查集就会顺着这种"中介书"把整套卷册串成一组。
+
+    :param gram_of: 可选 `(text, n) → Counter` 取用口，扫描时传缓存里的那份（见 `SimilarityCache`）
     """
     if not a_key or not b_key:
         return 0.0
     if a_key == b_key:
         return 1.0
+    if differs_only_by_serial(a_key, b_key):
+        return 0.0
 
-    score = dice_from_grams(grams(a_key), grams(b_key))
-    if has_cjk(a_key) or has_cjk(b_key):
-        score = min(score, _containment(_tokens(_squeeze(a_key)), _tokens(_squeeze(b_key))))
+    gram_of = gram_of or _grams_for
+    n = shared_ngram_size(a_key, b_key)
+    score = dice_from_grams(gram_of(a_key, n), gram_of(b_key, n))
+    # 包含度只在两侧同处"中文 bigram 空间"时才有意义；n=3（西文/混排）时
+    # 逐字 bigram 的包含关系不再成立，硬套会得出 0
+    if n == 2:
+        score = min(score, _containment(_bigrams(a_key), _bigrams(b_key)))
 
     # 主书名视角：任一边带尾注（core 与 key 不同）时才需要比较；两边都没注记时
     # core == key，这一路等于重算完整标题的分数，纯属浪费。
     # 注意条件写"任一边不同"而不是"两边都不同"——被比较的那一本通常正是没有注记的那一本。
     if a_core and b_core and (a_core != a_key or b_core != b_key):
-        core_dice = dice_from_grams(grams(a_core), grams(b_core))
-        if has_cjk(a_core) or has_cjk(b_core):
-            core_dice = min(core_dice, _containment(
-                _tokens(_squeeze(a_core)), _tokens(_squeeze(b_core))))
+        annotation_a = _annotation_of(a_key, a_core)
+        annotation_b = _annotation_of(b_key, b_core)
+        if (annotation_is_serial(annotation_a) or annotation_is_serial(annotation_b)
+                or differs_only_by_serial(a_core, b_core)):
+            return score                      # 注记本身是卷号/期次 → 不放行
+        core_n = shared_ngram_size(a_core, b_core)
+        core_dice = dice_from_grams(gram_of(a_core, core_n), gram_of(b_core, core_n))
+        if core_n == 2:
+            core_dice = min(core_dice, _containment(_bigrams(a_core), _bigrams(b_core)))
         if a_core == b_core:
             core_dice = 1.0
         score = max(score, core_dice)

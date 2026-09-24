@@ -10,8 +10,9 @@ Handler，宿主 toolbox_manager 把它们挂到：
     GET  /api/toolbox/tool/book_dedup/groups     分组列表（分页/筛选）
     GET  /api/toolbox/tool/book_dedup/group      单个分组的完整对照
     GET  /api/toolbox/tool/book_dedup/merge_plan 合并预览（只算不写）
-    POST /api/toolbox/tool/book_dedup/merge      执行合并（**唯一的写操作**）
-    POST /api/toolbox/tool/book_dedup/cancel     取消扫描
+    POST /api/toolbox/tool/book_dedup/merge      执行合并（写操作）
+    POST /api/toolbox/tool/book_dedup/delete     删除一本重复书（写操作）
+    GET  /api/toolbox/tool/book_dedup/cancel     取消扫描
 
 两个外部工具特有的注意点（与其它工具包一致）：
 
@@ -19,12 +20,13 @@ Handler，宿主 toolbox_manager 把它们挂到：
    鉴权装饰器**，所以这里必须显式写 `@js @is_admin`。
 2. `api_routes[].path` 是正则片段，前缀 `/api/toolbox/tool/<tool_id>/` 由宿主拼。
 
-**写操作只有一处**：`/merge`。它做的是"先复制格式、再删源记录"，两件事分开记账，
-并且 `/merge_plan` 会在动手前把「哪些格式会被复制、哪些同格式会被丢弃」摆清楚——
-同名格式不会被复制（`merge_book_formats` 只补目标书缺的格式），用户必须在动手前看到。
+**写操作只有两处**：`/merge`（先复制格式、再删源记录）与 `/delete`（单删一本）。
+两者都只接受"分组序号 + book_id"，成员由服务端回**本次扫描的索引**核对，不接受前端
+传成员列表；执行前还会确认保留项现在还在书库（报告是跨重启持久化的，可能是几天前扫的）。
 
-已知限制（刻意写在代码里，不假装没这回事）：工具箱的删除只清 `Item`，收藏/在读/进度/
-评分/书单会留下悬空行（上游 issue #82 未修）。前端在确认弹层里必须写明这一点。
+已知限制（刻意写在代码里，不假装没这回事）：同名格式不会被复制；被删掉的那本书上的
+用户数据会被宿主的级联清理一并删除（上游 issue #82 的修复），**不是迁移到保留项上**。
+前端在合并预览与删除确认里都必须写明这两点。
 """
 import json
 import logging
@@ -60,9 +62,6 @@ class BookDedupTool(BaseTool):
     _accepted = False
     _last_task_id: Optional[int] = None
     _cancel_event = threading.Event()
-    # 本次扫描的记录（内存里留一份，供分组明细用）。扫描结果 MB 级，只留最近一次。
-    _records = None
-    _records_lock = threading.Lock()
 
     # 与仓库根 manifest.json 的对应字段保持一致
     @staticmethod
@@ -72,7 +71,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.3',
+            'revision': '0.1.4',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -126,18 +125,6 @@ class BookDedupTool(BaseTool):
     def release_task(cls) -> None:
         with cls._state_lock:
             cls._accepted = False
-
-    # ---------------------------------------------------------------- 记录暂存
-
-    @classmethod
-    def set_records(cls, records):
-        with cls._records_lock:
-            cls._records = records
-
-    @classmethod
-    def get_records(cls):
-        with cls._records_lock:
-            return cls._records
 
     # ---------------------------------------------------------------- 取数
 
@@ -231,7 +218,6 @@ class BookDedupTool(BaseTool):
             driver.write_report(work_dir, built)
             driver.write_index(work_dir, built)
             driver.write_latest_marker(cls.shared_dir(), task_id, built)
-            cls.set_records(cls._records_snapshot)
             summary = built.get('summary') or {}
             tool.update_task_progress(
                 task_id, 100,
@@ -247,7 +233,6 @@ class BookDedupTool(BaseTool):
             tool.complete_task(task_id, error_message=str(err))
         finally:
             cls._scan_ids = None
-            cls._records_snapshot = None
             cls.release_task()
 
 
@@ -337,7 +322,6 @@ class StartHandler(BaseHandler):
         BookDedupTool._scan_ids = book_ids
         BookDedupTool._scan_threshold = threshold
         BookDedupTool._scan_scope_note = str(payload.get('scope_note') or '')
-        BookDedupTool._records_snapshot = None
 
         worker = threading.Thread(
             target=BookDedupTool.run_scan, args=(task_id,),
@@ -448,6 +432,8 @@ class GroupsHandler(BaseHandler):
                 'gone_ids': sorted(gone),
                 'removed_titles': removed,
                 'deleted_titles': write_ops.read_deleted_titles(work_dir),
+                # 没做成的那几步也要摆出来：界面"已处理"区据此如实显示失败
+                'failed_titles': write_ops.read_failed_titles(work_dir),
             },
         }
 
@@ -528,12 +514,15 @@ class MergePlanHandler(BaseHandler):
 
 
 class MergeHandler(BaseHandler):
-    """POST /merge —— 执行合并。**本工具唯一的写操作。**
+    """POST /merge —— 执行合并（写操作之一）。
 
     请求体：``{"index": 3, "keeper_id": 12, "task_id": 7, "delete_source": true}``
 
     `index` 是本次扫描里的分组序号；服务端会用它把成员 id 与那次扫描**绑定**，
     不接受前端直接传成员列表——否则一个被篡改/过期的列表会去删没被查出来的书。
+
+    部分失败也是"成功"返回（`err=ok`），但 `data.failed` 会如实给出失败条数，
+    失败明细落进记账（`/groups` 回 `failed_titles`）——界面必须显示出来。
     """
 
     @js
@@ -632,5 +621,4 @@ ROUTES = (
 BookDedupTool._scan_ids = None
 BookDedupTool._scan_threshold = driver.DEFAULT_THRESHOLD
 BookDedupTool._scan_scope_note = ''
-BookDedupTool._records_snapshot = None
 BookDedupTool._worker = None

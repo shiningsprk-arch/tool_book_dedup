@@ -249,6 +249,12 @@
 
 .bd-handled-deleted { color: var(--mb-color-error); }
 
+/* 没做成的那些步骤：同色系 + 加粗，语义是"注意，这一步没生效" */
+.bd-handled-failed {
+  color: var(--mb-color-error);
+  font-weight: 600;
+}
+
 .bd-plan {
   margin-top: 14px;
   padding-top: 12px;

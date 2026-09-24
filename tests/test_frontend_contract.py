@@ -41,7 +41,8 @@ def used_keys():
     keys |= set(re.findall(r'data-i18n="([^"]+)"', html))
     keys |= set(re.findall(r'data-i18n-attr="[^:]+:([^"]+)"', html))
     for table in re.finditer(
-            r"var (REASON_KEYS|CONFIDENCE_KEYS|KEEPER_REASON_KEYS|PHASE_KEYS) = \{(.*?)\};",
+            r"var (REASON_KEYS|CONFIDENCE_KEYS|KEEPER_REASON_KEYS|PHASE_KEYS"
+            r"|DIFF_FIELD_KEYS|FAILURE_KEYS) = \{(.*?)\};",
             js, re.S):
         keys |= set(re.findall(r":\s*'([a-zA-Z][a-zA-Z0-9_.]*)'", table.group(2)))
     # 汇总条的 `['summary.groups', '重复分组', value]` 形式：数组首元素是键
@@ -187,6 +188,29 @@ class TestFrontendWiring(unittest.TestCase):
         body = match.group(1)
         self.assertIn('refreshDrawer()', body)
         self.assertNotIn('loadGroups()', body)
+
+    def test_diff_table_renders_through_i18n(self):
+        """**回归（review P2）**：对照表不许把后端的字符串原样渲染。
+
+        字段名与"体积/评分/是否/实体书/未评分"这些取值以前是后端拼好的中文，
+        前端直接 `escapeHtml(row.label)` / `escapeHtml(cell.value)` → en / zh-TW 下
+        整张表都是中文。现在字段名走 `DIFF_FIELD_KEYS`，取值按 `cell.kind` 在本地区文案。
+        """
+        self.assertIn('diffFieldLabel(row)', self.js)
+        self.assertIn('diffCellText(row.field, cell)', self.js)
+        self.assertNotIn('escapeHtml(row.label)', self.js)
+        self.assertNotIn('escapeHtml(cell.value)', self.js)
+        # 后端的 summary 是中文句子（只写进报告文件给人看），界面必须自己拼
+        self.assertNotIn('escapeHtml(diff.summary)', self.js)
+        for kind, key in (('bytes', 'diff.score'), ('rating', 'diff.stars'),
+                          ('bool', 'diff.yes'), ('enum', 'diff.physical')):
+            self.assertIn("'%s'" % kind, self.js, '没处理 kind=%s' % kind)
+        self.assertIn("t('diff.shared'", self.js)
+
+    def test_delete_source_defaults_to_unchecked(self):
+        """**回归（review P1）**：删除是不可逆的，默认值不该是破坏性的那一个。"""
+        self.assertIn('data-delete-source>', self.js)
+        self.assertNotIn('data-delete-source checked>', self.js)
 
     def test_no_absolute_api_paths(self):
         """工具接口必须走桥（相对路径）；唯一例外是本地预览的兜底分支。

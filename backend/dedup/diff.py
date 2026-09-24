@@ -7,14 +7,25 @@ everywhere"）。**本文件是 clean-room 重写**，字段集换成 MyBooks �
 
 这一层直接解决"两份元数据可能完全一致"：一致就不出对照行，界面自然没有噪音，
 差异会落到入库时间与条目属性上，用户一眼就能定。
+
+**值分两类**（`_cell`）：
+- `kind='text'`：已经渲染好的短文本（格式列表、标签、日期…），与语言无关
+- 其余 kind（`bytes`/`score`/`rating`/`bool`/`enum`）：只给**原始值**，由前端按当前语言渲染
+  （"79.9 KB"、"9 星"/"未评分"、"是"/"否"、"实体书"/"电子书"）
+
+之所以要区分：这些文案以前是后端拼好的中文字符串，前端原样渲染——en / zh-TW 下
+整张对照表都是中文。字段名同理：后端给 `field` 这个稳定标识，前端用 `diff.field.<field>`
+取本地化名字（`label` 只作为回退，也是报告文件里给人看的中文标注）。
 """
 
 # 参与对照的字段：字段名 → (中文名, 取值函数)。取值函数必须返回可比较的标量/元组。
+# 中文名只用于报告文件（给人看）与前端取不到本地化键时的回退。
 FIELD_ACCESSORS = {
     'size': ('体积', lambda r: int(r.get('size') or 0)),
     'formats': ('格式', lambda r: tuple(sorted(f.upper() for f in (r.get('formats') or [])))),
     'isbn': ('ISBN', lambda r: r.get('isbn') or r.get('isbn13') or r.get('isbn10') or ''),
     'metadata': ('元数据', lambda r: r.get('_meta_score', 0)),
+    'cover': ('封面', lambda r: bool(r.get('has_cover'))),
     'added': ('入库时间', lambda r: str(r.get('added') or '')),
     'rating': ('评分', lambda r: r.get('rating') or 0),
     'tags': ('标签', lambda r: tuple(sorted(r.get('tags') or []))),
@@ -56,7 +67,10 @@ def differing_fields(records):
 
 
 def summary_sentence(records):
-    """把"全都一样"的字段折成一句人话，供界面在对照表上方显示。
+    """把"全都一样"的字段折成一句人话。
+
+    **只写进报告文件给人看**（界面不再用它——中文字符串在 en / zh-TW 下是错的语言，
+    前端现在用 `shared` 里的字段名自己按当前语言拼）。
 
     不逐项罗列——"体积相同、格式相同、ISBN 相同……" 铺满一行没人看。
     说清楚"除了这几项之外全部相同"就够，剩下的差异行本来就会展开给用户看。
@@ -87,6 +101,8 @@ def best_ids(records, field):
         values = [(r.get('rating') or 0, r['id']) for r in records]
     elif field == 'tags':
         values = [(len(r.get('tags') or []), r['id']) for r in records]
+    elif field == 'cover':
+        values = [(1 if r.get('has_cover') else 0, r['id']) for r in records]
     else:
         return None
     best = max(values)
@@ -107,7 +123,7 @@ def build_table(records):
         rows.append({
             'field': field,
             'label': label,
-            'cells': [{'book_id': r['id'], 'value': _display(r, field)} for r in records],
+            'cells': [_cell(r, field) for r in records],
             'best_id': best_ids(records, field),
         })
     return {
@@ -117,36 +133,49 @@ def build_table(records):
     }
 
 
+# 字段 → 值类型。`text` 之外的类型由前端按当前语言渲染（见模块 docstring）。
+_VALUE_KINDS = {
+    'size': 'bytes',
+    'metadata': 'score',
+    'rating': 'rating',
+    'cover': 'bool',
+    'sole': 'bool',
+    'book_type': 'enum',
+}
+
+
+def _cell(record, field):
+    """对照表里的一格：`{'book_id', 'kind', 'value'}`。"""
+    kind = _VALUE_KINDS.get(field, 'text')
+    value = _display(record, field)
+    return {'book_id': record['id'], 'kind': kind, 'value': value}
+
+
 def _display(record, field):
-    """把取值渲染成给用户看的短文本。"""
+    """把取值渲染成短文本。
+
+    **语言无关**的在这里渲染（格式列表、标签、日期、原始数字）；
+    与语言有关的几种只送原始值（kind != 'text'），文案交给前端。
+    """
     if field == 'size':
-        return format_bytes(int(record.get('size') or 0))
+        return int(record.get('size') or 0)
+    if field == 'metadata':
+        return int(record.get('_meta_score') or 0)
+    if field == 'rating':
+        return int(record.get('rating') or 0)
+    if field == 'cover':
+        return bool(record.get('has_cover'))
+    if field == 'sole':
+        return bool(record.get('sole'))
+    if field == 'book_type':
+        return 1 if record.get('book_type') else 0
     if field == 'formats':
         return '、'.join(sorted(f.upper() for f in (record.get('formats') or []))) or '—'
-    if field == 'metadata':
-        return '%d 分' % int(record.get('_meta_score') or 0)
     if field == 'added':
         value = str(record.get('added') or '')
         return value[:19].replace('T', ' ') if value else '—'
-    if field == 'rating':
-        value = record.get('rating') or 0
-        return '%d 星' % (value / 2) if value else '未评分'
     if field in ('tags', 'languages', 'translators'):
         values = record.get(field) or []
         return '、'.join(str(v) for v in values) if values else '—'
-    if field in ('sole',):
-        return '是' if record.get('sole') else '否'
-    if field == 'book_type':
-        return '实体书' if record.get('book_type') else '电子书'
     value = record.get(field)
     return str(value) if value not in (None, '', []) else '—'
-
-
-def format_bytes(size):
-    """字节 → 人类可读（1 位小数，够用且不啰嗦）。"""
-    size = float(size or 0)
-    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
-        if size < 1024 or unit == 'TB':
-            return ('%d %s' % (size, unit)) if unit == 'B' else ('%.1f %s' % (size, unit))
-        size /= 1024.0
-    return '%.1f TB' % size

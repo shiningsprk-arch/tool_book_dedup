@@ -37,6 +37,18 @@ keeper = dedup.keeper
 report = dedup.report
 
 
+def score_titles(left, right):
+    """按**扫描时的口径**比较两个原始书名：完整标题与主书名两个视角都带上。
+
+    只传 `title_key()` 会丢掉主书名视角，`孙子兵法` / `孙子兵法(全本)` 就会只有 0.75——
+    那是测试自己漏了参数，不是引擎的行为。
+    """
+    return similarity.variant_score(
+        normalize.title_key(left), normalize.title_key(right),
+        normalize.title_key(normalize.title_core(left)),
+        normalize.title_key(normalize.title_core(right)))
+
+
 def make_record(book_id, title, authors=('某作者',), formats=('EPUB',), size=1000,
                 isbn=None, added='2026-01-01T00:00:00', **extra):
     record = {
@@ -129,6 +141,48 @@ class TestNormalizeText(unittest.TestCase):
         self.assertLess(normalize.cjk_ratio('The Hobbit'), 0.1)
 
 
+class TestSerialMarker(unittest.TestCase):
+    """序列标记：卷/册/辑/期/部次的序号（判定层最重要的一道闸，见 cluster.py 注释）。"""
+
+    def test_is_serial_marker(self):
+        for text in ('1', '12', '第一部', '第十二部', '全13册', '上', '中', '下册',
+                     'vol.10', '16jun', '20161029', '第1卷上下'):
+            marker = normalize.title_key(text)
+            self.assertTrue(normalize.is_serial_marker(marker), marker)
+        # "另一种版本"的注记不是序列标记
+        for text in ('全本', '全集', '修订版', '果麦经典', '经典版', '插图版',
+                     '企鹅经典丛书第二辑：上海文艺精装版'):
+            marker = normalize.title_key(text)
+            self.assertFalse(normalize.is_serial_marker(marker), marker)
+        self.assertFalse(normalize.is_serial_marker(''))
+
+    def test_annotation_is_serial(self):
+        """注记判定：带数字/以卷号开头/整段是序数的算卷册；丛书名、版本名不算。"""
+        for text in ('三', '一', '上', '中册', '第一部 发配牛背驼', '第一部', '至24卷26章',
+                     '1-9', '全20卷', '20161029', 'Thu, 16 Jun 2016', '周五, 31 一月 2014',
+                     '套装上下册', '典藏版套装共8册'):
+            self.assertTrue(normalize.annotation_is_serial(text), text)
+        for text in ('全本', '全集', '修订版', '经典版', '果麦经典', '译文名著精选',
+                     '图文增补版', '别册', '企鹅经典丛书第二辑：上海文艺精装版',
+                     '读客熊猫君出品，余华不吃不喝不睡，疯了般读完了这本书'):
+            self.assertFalse(normalize.annotation_is_serial(text), text)
+
+    def test_differs_only_by_serial(self):
+        self.assertTrue(normalize.differs_only_by_serial('德川家康第一部', '德川家康第十二部'))
+        self.assertTrue(normalize.differs_only_by_serial('苗疆蛊事', '苗疆蛊事1'))
+        self.assertTrue(normalize.differs_only_by_serial('全金属狂潮10', '全金属狂潮19'))
+        self.assertFalse(normalize.differs_only_by_serial('孙子兵法', '孙子兵法全本'))
+        self.assertFalse(normalize.differs_only_by_serial('活着', '三体'))
+        # 完全同名（真重复）与空值都不算"只差序号"
+        self.assertFalse(normalize.differs_only_by_serial('三体', '三体'))
+        self.assertFalse(normalize.differs_only_by_serial('', '三体'))
+        self.assertFalse(normalize.differs_only_by_serial('三体', ''))
+        # 公共前缀太短（<2 字）不算——短串本来就不可信
+        self.assertFalse(normalize.differs_only_by_serial('12', '13'))
+        # 对称性
+        self.assertTrue(normalize.differs_only_by_serial('德川家康第十二部', '德川家康第一部'))
+
+
 class TestSimilarity(unittest.TestCase):
     def test_ngram_size_by_language(self):
         self.assertEqual(similarity.ngram_size_for('活着'), 2)
@@ -187,6 +241,108 @@ class TestSimilarity(unittest.TestCase):
         self.assertLess(similarity.similarity('三体', '三体3'), 0.85)
         # 但两本内容真的相同（一字不差）仍然是 1.0
         self.assertAlmostEqual(similarity.similarity('三体', '三体'), 1.0)
+
+    def test_serial_only_difference_is_excluded(self):
+        """**只差一个卷号/期号**的对必须排除——这类对的主书名相同，光靠阈值拦不住。
+
+        真书库（24,835 本）实测：不排除它们的话，87% 的分组都是"同系列不同卷"，
+        而界面上一键"合并这一组"会把整套书删到只剩一本。这些用例是那次 review 的原文。
+        """
+        cases = [
+            ('德川家康（第一部）', '德川家康（第十二部）'),
+            ('天龙八部（一）', '天龙八部（二）'),
+            ('笑傲江湖（一）', '笑傲江湖（四）'),
+            ('罗马人的故事4：凯撒时代（上）', '罗马人的故事4：凯撒时代（下）'),
+            ('苗疆蛊事', '苗疆蛊事1'),
+            ('苗疆蛊事1', '苗疆蛊事2'),
+            ('明朝那些事儿', '明朝那些事儿·壹'),
+            ('全金属狂潮 10', '全金属狂潮 19'),
+            ('The Economist [Thu, 16 Jun]', 'The Economist [Thu, 23 Jun]'),
+            ('The Economist (20161029)', 'The Economist (20161105)'),
+            ('德川家康（全13册）', '德川家康（第十二部）'),
+            ('李自成（全10卷）', '李自成'),
+        ]
+        for left, right in cases:
+            score = score_titles(left, right)
+            self.assertLess(score, 0.85, '%s vs %s 被判成了重复' % (left, right))
+
+    def test_edition_annotation_still_matches(self):
+        """"另一种版本"的注记（不是序号）必须照旧放行——这才是要查的真重复。"""
+        cases = [
+            ('孙子兵法', '孙子兵法(全本)'),
+            ('孙子兵法', '孙子兵法[修订版]'),
+            ('我是猫', '我是猫(果麦经典)'),
+            ('我是猫', '我是猫（企鹅经典丛书第二辑：上海文艺精装版）'),
+            ('万历十五年', '万历十五年（经典版）'),
+            ('斗破苍穹', '斗破苍穹（全本）'),
+            ('焚舟纪（别册）', '焚舟纪别册'),
+        ]
+        for left, right in cases:
+            score = score_titles(left, right)
+            self.assertGreaterEqual(score, 0.85, '%s vs %s 被误排除' % (left, right))
+
+    def test_annotation_with_volume_marker_is_not_a_variant(self):
+        """**回归（review P1 二轮）**：注记里带卷号/期次时，主书名视角不许放行。
+
+        光排除"两侧书名只差一个卷号"是不够的：真书库里误差是通过**中间人**串起来的。
+        `侯海洋基层风云（第一部 发配牛背驼）` 与 `（第二部 巴山城管）` 的主书名都是
+        "侯海洋基层风云"；`苗疆蛊事（全集）`（主书名"苗疆蛊事"）与 `苗疆蛊事1` 之间也
+        只差一个卷号。只要有一条边活下来，并查集就会把整套卷册连成一组——
+        实测（24,835 本真书库）这几种形态让最大分组达到 19 本。
+        """
+        cases = [
+            ('侯海洋基层风云（第一部 发配牛背驼）', '侯海洋基层风云（第二部 天堂到地狱）'),
+            ('苗疆蛊事（全集）', '苗疆蛊事1'),
+            ('苗疆蛊事（至24卷26章）', '苗疆蛊事2'),
+            ('鹿鼎记（新修版）', '鹿鼎记（三）'),
+            ('The Economist [Thu, 16 Jun 2016]', 'The Economist [周五, 31 一月 2014]'),
+            ('The Economist (20161029)', 'The Economist [周五, 31 一月 2014]'),
+            ('鲁迅全集（全20卷）', '鲁迅全集'),
+            ('蒋勋说红楼梦(典藏版)(套装共8册)', '蒋勋说红楼梦'),
+            ('基督山伯爵(套装上下册)', '基督山伯爵'),
+        ]
+        for left, right in cases:
+            score = score_titles(left, right)
+            self.assertLess(score, 0.85, '%s vs %s 被判成了重复' % (left, right))
+
+    def test_publisher_annotation_still_matches(self):
+        """丛书名/版本名的注记不能被上面的规则误伤。
+
+        判据锚在注记**开头**就是为了这条：`（企鹅经典丛书第二辑：上海文艺精装版）`
+        虽然含"第二辑"，但它是丛书名（同一本书的另一个版本），不是卷号。
+        """
+        cases = [
+            ('我是猫', '我是猫（企鹅经典丛书第二辑：上海文艺精装版）'),
+            ('我是猫', '我是猫(果麦经典)'),
+            ('万历十五年', '万历十五年（经典版）'),
+            ('明朝那些事儿', '明朝那些事儿（图文增补版）'),
+        ]
+        for left, right in cases:
+            score = score_titles(left, right)
+            self.assertGreaterEqual(score, 0.85, '%s vs %s 被误排除' % (left, right))
+
+    def test_identical_serial_titles_stay_matched(self):
+        """同名同卷号的**真重复**仍要成组（"罗马人的故事4：凯撒时代（上）" x6 那种）。"""
+        title = '罗马人的故事4：凯撒时代（上）'
+        self.assertAlmostEqual(score_titles(title, title), 1.0)
+        self.assertAlmostEqual(score_titles('天龙八部（一）', '天龙八部（一）'), 1.0)
+
+    def test_mixed_script_titles_do_not_collapse_to_zero(self):
+        """中英混排的标题不能再恒为 0：n 必须是两侧共用的。
+
+        原来 `ngram_size_for` 是逐串判断的，`哈利波特 Harry Potter`（CJK 占比 0.27）
+        取 3-gram 而 `哈利波特` 取 2-gram，两套 n-gram 交集恒空 → 相似度 0.000，
+        同一本书带英文副题就永远查不出来。现在分数是有意义的（虽然仍低于阈值）。
+        """
+        for left, right in (('哈利波特 Harry Potter', '哈利波特'),
+                            ('三体 Three Body', '三体')):
+            score = similarity.similarity(normalize.title_key(left),
+                                          normalize.title_key(right))
+            self.assertGreater(score, 0.0, '%s vs %s 仍是 0' % (left, right))
+
+    def test_shared_ngram_size_is_the_smaller_one(self):
+        self.assertEqual(similarity.shared_ngram_size('哈利波特', 'thehobbit'), 2)
+        self.assertEqual(similarity.shared_ngram_size('thehobbit', 'lordofrings'), 3)
 
     def test_unrelated_titles_score_low(self):
         self.assertLess(similarity.similarity('活着', '三体'), 0.25)
@@ -254,23 +410,32 @@ class TestCluster(unittest.TestCase):
         self.assertEqual(stats['skipped_books'], 20)
         self.assertEqual(stats['comparisons'], 0)
 
-    def test_authorless_books_only_match_by_isbn(self):
-        """没有作者的书不参与作者桶比较（否则全库无作者的书会两两相比）。
+    def test_authorless_books_share_one_bucket(self):
+        """没有作者的书**仍要**比较标题：它们全落进同一个 "" 桶。
 
-        这是刻意的：中文个人书库作者字段常为空，若把它们都丢进同一个桶做两两比较，
-        一次扫描就是 O(n²)。这类记录只靠 ISBN 强证据成组。
+        这里曾经断言"不参与比较"，与 `cluster.py` 的模块注释（"那类书会全部落进同一个
+        『无作者』桶"）正好相反 —— 后果是同一本无作者的书在标题上永远查不出来。
+        防 O(n²) 的是桶上限（`max_bucket`），见下一条。
         """
         left = make_record(1, '无名书', authors=[])
         right = make_record(2, '无名书', authors=[])
         pairs, stats = cluster.candidate_pairs([left, right], threshold=0.5)
-        self.assertEqual(pairs, [])
-        self.assertEqual(stats['comparisons'], 0)
-        # 有 ISBN 时仍然能成组
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(stats['comparisons'], 1)
+        # 有 ISBN 时仍然能成组（走强证据那一档）
         left = make_record(3, '无名书', authors=[], isbn='9780306406157')
         right = make_record(4, '完全不同', authors=[], isbn='9780306406157')
         pairs, _stats = cluster.candidate_pairs([left, right], threshold=0.99)
         self.assertEqual(len(pairs), 1)
         self.assertEqual(pairs[0]['reasons'], ['isbn'])
+
+    def test_authorless_bucket_respects_cap(self):
+        """无作者桶再大也受 `max_bucket` 约束（跳过大桶并记账，不拖住扫描）。"""
+        records = [make_record(i + 1, '无名书%d' % i, authors=[]) for i in range(30)]
+        pairs, stats = cluster.candidate_pairs(records, threshold=0.5, max_bucket=4)
+        self.assertEqual(pairs, [])
+        self.assertEqual(stats['skipped_buckets'], 1)
+        self.assertEqual(stats['skipped_books'], 30)
 
     def test_union_find_groups_chain(self):
         """A~B、B~C 应该并成一个三人组（并查集的传递性）。"""
@@ -363,10 +528,40 @@ class TestDiff(unittest.TestCase):
         if added_row:
             self.assertIsNone(added_row[0]['best_id'])
 
-    def test_format_bytes(self):
-        self.assertEqual(diff.format_bytes(0), '0 B')
-        self.assertEqual(diff.format_bytes(2048), '2.0 KB')
-        self.assertEqual(diff.format_bytes(1024 * 1024), '1.0 MB')
+    def test_cells_carry_kind_for_frontend_i18n(self):
+        """**回归（review P2）**：与语言有关的取值只送原始值，文案交给前端。
+
+        以前 `_display` 直接返回中文（"2.0 KB"/"9 星"/"实体书"），前端原样渲染，
+        于是 en / zh-TW 的对照表整张都是中文。
+        """
+        left = make_record(1, '三体', formats=['EPUB'], size=100)
+        right = make_record(2, '三体', formats=['EPUB', 'PDF'], size=300)
+        left['_meta_score'] = right['_meta_score'] = 50
+        left['rating'] = 8
+        right['rating'] = 0
+        left['has_cover'] = True
+        right['has_cover'] = False
+        rows = {r['field']: r for r in diff.build_table([left, right])['rows']}
+        self.assertEqual(rows['size']['cells'][0]['kind'], 'bytes')
+        self.assertEqual(rows['size']['cells'][1]['value'], 300)          # 原始字节
+        self.assertEqual(rows['rating']['cells'][0]['kind'], 'rating')
+        self.assertEqual(rows['rating']['cells'][1]['value'], 0)          # 0 = 未评分
+        self.assertEqual(rows['cover']['cells'][0]['kind'], 'bool')
+        self.assertTrue(rows['cover']['cells'][0]['value'])
+        # 语言无关的字段照旧给文本
+        self.assertEqual(rows['formats']['cells'][1]['kind'], 'text')
+        self.assertEqual(rows['formats']['cells'][1]['value'], 'EPUB、PDF')
+
+    def test_cover_is_compared_and_recommended(self):
+        """封面差异要出现在对照表里，并且"有封面"那本被标为更好。"""
+        left = make_record(1, '三体')
+        right = make_record(2, '三体')
+        left['has_cover'] = False
+        right['has_cover'] = True
+        rows = {r['field']: r for r in diff.build_table([left, right])['rows']}
+        self.assertIn('cover', rows)
+        self.assertEqual(rows['cover']['best_id'], 2)
+        self.assertEqual(rows['cover']['label'], '封面')
 
 
 class TestKeeper(unittest.TestCase):
@@ -464,23 +659,28 @@ class TestReport(unittest.TestCase):
         ranks = [g['confidence'] for g in built['groups']]
         self.assertTrue(ranks)
 
-    def test_filter_keeps_full_summary(self):
-        """筛选只影响 groups，summary 始终是全量统计，另回 filtered 计数。"""
-        built = self._report()
-        filtered, count = report.filter_report(built, keyword='活着')
-        self.assertEqual(count, len(filtered['groups']))
-        self.assertEqual(filtered['summary'], built['summary'])
-        self.assertEqual(filtered['filtered']['group_count'], count)
+    def test_confidence_tier_splits_fuzzy_by_similarity(self):
+        """**回归（review P2）**：模糊命中要按相似度分"很可能 / 存疑"。
 
-    def test_filter_by_min_members(self):
-        built = self._report()
-        _filtered, count = report.filter_report(built, min_members=3)
-        self.assertEqual(count, 0)
+        以前 rank 1 一律叫"很可能"，而"存疑"在候选生成里根本不可能出现——
+        界面上的"存疑"筛选器永远筛不出东西，真书库 1584 组里 1582 组都显示"很可能"。
+        """
+        self.assertEqual(report.confidence_of(3), 'strong')                    # ISBN 命中
+        self.assertEqual(report.confidence_of(1, 1.0), 'likely')
+        self.assertEqual(report.confidence_of(1, report.SIMILARITY_LIKELY), 'likely')
+        self.assertEqual(report.confidence_of(1, 0.9), 'weak')
+        self.assertEqual(report.confidence_of(0), 'weak')
+        self.assertEqual(report.confidence_of(2), 'likely')
 
-    def test_filter_by_keyword_matches_author(self):
-        built = self._report()
-        _filtered, count = report.filter_report(built, keyword='余华')
-        self.assertGreaterEqual(count, 1)
+    def test_summary_reports_serial_excluded(self):
+        """因卷册序号被排除的候选对要进 summary（不静默吞掉）。"""
+        left = make_record(1, '德川家康（第一部）')
+        right = make_record(2, '德川家康（第十二部）')
+        pairs, stats = cluster.candidate_pairs([left, right], threshold=0.85)
+        self.assertEqual(pairs, [])
+        self.assertEqual(stats['skipped_serial'], 1)
+        built = report.build_report([left, right], pairs, [], 0.85, stats)
+        self.assertEqual(built['summary']['serial_excluded'], 1)
 
     def test_paginate_clamps(self):
         groups = list(range(120))

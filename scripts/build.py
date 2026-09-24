@@ -234,11 +234,19 @@ def validate_archive(archive, manifest):
     return problems
 
 
+# 官方脚手架 npm 包名（`docs/mybooks-toolbox-guide-v4.3.0.md:193`）：
+# `npm install -g mybooks-tools-builder` 之后命令名才叫 `mytool`。
+# **不要写成 `npx --yes mytool`**：npm 上没有这个包，npx 会直接报
+# "could not determine executable to run"，于是这一步永远退化成"跳过"，
+# 而打印出来的却是"未通过/跳过"——看起来像跑过了。
+MYTOOL_PACKAGE = 'mybooks-tools-builder'
+
+
 def run_mytool(archive):
     """可选：用官方脚手架再校验一次（需要 node/npx）。"""
     try:
         result = subprocess.run(
-            ['npx', '--yes', 'mytool', 'validate', archive],
+            ['npx', '--yes', MYTOOL_PACKAGE, 'validate', archive],
             capture_output=True, text=True, shell=(os.name == 'nt'))
     except FileNotFoundError:
         return False, 'npx 不可用，跳过官方校验'

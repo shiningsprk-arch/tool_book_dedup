@@ -121,6 +121,7 @@
     goneIds: [],
     removedTitles: [],
     deletedTitles: [],
+    failedTitles: [],
     active: null,        // 当前展开的分组 {index, group, keeperId}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
@@ -436,6 +437,10 @@
       ['summary.reclaimable', '可回收空间', formatBytes(summary.reclaimable_bytes)],
       ['summary.waste', '同格式重占', formatBytes(summary.disk_waste_bytes)],
     ];
+    // "因卷册序号排除"只在真的排除了才显示——它解释"为什么这套书没被报出来"
+    if (summary.serial_excluded) {
+      items.push(['summary.serialExcluded', '已排除卷册序号', summary.serial_excluded]);
+    }
     el.summary.innerHTML = items.map(function (item) {
       return '<div class="bd-stat"><span class="bd-stat-value">' + escapeHtml(item[2]) +
         '</span><span class="bd-stat-label">' + escapeHtml(t(item[0], item[1])) +
@@ -461,6 +466,7 @@
       state.goneIds = data.gone_ids || [];
       state.removedTitles = data.removed_titles || [];
       state.deletedTitles = data.deleted_titles || [];
+      state.failedTitles = data.failed_titles || [];
       if (data.summary) renderSummary(data.summary);
       renderList(data);
       renderHandled();
@@ -811,36 +817,92 @@
   }
 
   function diffTableHtml(diff, members, keeper) {
-    diff = diff || { rows: [], summary: '' };
+    diff = diff || { rows: [], shared: [] };
     var head = '<tr><th>' + escapeHtml(t('diff.field', '对比项')) + '</th>' +
       members.map(function (member) {
         var mark = member.id === keeper ? ' class="bd-th-keep"' : '';
         return '<th' + mark + '>' + escapeHtml(member.title) + '</th>';
       }).join('') + '</tr>';
     var rows = (diff.rows || []).map(function (row) {
-      return '<tr><td class="bd-td-field">' + escapeHtml(row.label) + '</td>' +
+      return '<tr><td class="bd-td-field">' + escapeHtml(diffFieldLabel(row)) + '</td>' +
         (row.cells || []).map(function (cell) {
           var best = row.best_id && row.best_id === cell.book_id ? ' bd-td-best' : '';
-          return '<td class="' + best.trim() + '">' + escapeHtml(cell.value) + '</td>';
+          return '<td class="' + best.trim() + '">' +
+            escapeHtml(diffCellText(row.field, cell)) + '</td>';
         }).join('') + '</tr>';
     }).join('');
 
-    var summary = diff.summary
-      ? '<p class="bd-hint">' + escapeHtml(diff.summary) + '</p>'
-      : '';
+    // 摘要按**当前语言**在本地拼：后端那句是中文（报告文件里给人看的），
+    // en / zh-TW 下直接用它就是整句中文
+    var summary = '';
+    if ((diff.shared || []).length) {
+      var sharedNames = diff.shared.map(function (field) {
+        return diffFieldText(field, field);
+      }).join(t('diff.listJoin', '、'));
+      summary = '<p class="bd-hint">' + escapeHtml(t('diff.shared',
+        '这些项两份都相同：{fields}').replace('{fields}', sharedNames)) + '</p>';
+    }
     var body = rows
       ? '<table class="bd-diff"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table>'
       : '<p class="bd-hint">' + escapeHtml(t('diff.allSame', '两份的元数据与条目属性完全相同')) + '</p>';
     return '<div class="bd-diff-wrap">' + summary + body + '</div>';
   }
 
+  // 对照表的字段名：后端给稳定的 `field` 标识，这里映射到 i18n 键。
+  // 刻意写成"字段 → 完整键名"的字面量表：拼键（'diff.field.' + field）会让契约测试
+  // 静态对账不出"到底用了哪些键"（前端的键扫描靠字面量）。
+  var DIFF_FIELD_KEYS = {
+    size: 'diff.field.size',
+    formats: 'diff.field.formats',
+    isbn: 'diff.field.isbn',
+    metadata: 'diff.field.metadata',
+    cover: 'diff.field.cover',
+    added: 'diff.field.added',
+    rating: 'diff.field.rating',
+    tags: 'diff.field.tags',
+    series: 'diff.field.series',
+    publisher: 'diff.field.publisher',
+    languages: 'diff.field.languages',
+    translators: 'diff.field.translators',
+    collector: 'diff.field.collector',
+    sole: 'diff.field.sole',
+    book_type: 'diff.field.book_type',
+  };
+
+  function diffFieldText(field, fallback) {
+    var key = DIFF_FIELD_KEYS[field];
+    return key ? t(key, fallback || field) : (fallback || field);
+  }
+
+  function diffFieldLabel(row) {
+    // 兜底用后端给的中文标注（那是报告文件里给人看的）
+    return diffFieldText(row.field, row.label);
+  }
+
+  function diffCellText(field, cell) {
+    var value = cell.value;
+    if (cell.kind === 'bytes') return formatBytes(value);
+    if (cell.kind === 'score') return t('diff.score', '{n} 分').replace('{n}', value);
+    if (cell.kind === 'rating') {
+      return value ? t('diff.stars', '{n} 星').replace('{n}', value / 2)
+                   : t('diff.unrated', '未评分');
+    }
+    if (cell.kind === 'bool') return value ? t('diff.yes', '是') : t('diff.no', '否');
+    if (cell.kind === 'enum') {
+      return value ? t('diff.physical', '实体书') : t('diff.ebook', '电子书');
+    }
+    return value === undefined || value === null ? '—' : String(value);
+  }
+
   function renderHandled() {
     var merged = state.removedTitles || [];
     var deleted = state.deletedTitles || [];
-    var total = merged.length + deleted.length;
+    var failed = state.failedTitles || [];
+    var total = merged.length + deleted.length + failed.length;
     el['handled-card'].hidden = total === 0;
     if (!total) return;
-    // 合并的与被单独删掉的分开写：两者后果不同（合并会把格式搬到保留项，纯删除不会）
+    // 三类分开写：合并的、单独删掉的、**没做成的**——后果各不相同，
+    // 尤其"没做成"必须显示出来（以前 5 本失败 3 本时提示仍是"已合并…"）
     var items = merged.map(function (item) {
       return '<li>' + escapeHtml(t('handled.item', '《{title}》已并入《{into}》')
         .replace('{title}', item.title).replace('{into}', item.into)) +
@@ -849,8 +911,29 @@
       return '<li class="bd-handled-deleted">' +
         escapeHtml(t('handled.deleted', '《{title}》已删除').replace('{title}', item.title)) +
         '<span class="bd-hint"> · ' + escapeHtml(item.at || '') + '</span></li>';
+    })).concat(failed.map(function (item) {
+      return '<li class="bd-handled-failed">' +
+        escapeHtml(t('handled.failed', '《{title}》未处理：{reason}')
+          .replace('{title}', item.title)
+          .replace('{reason}', failureReasonText(item))) +
+        '<span class="bd-hint"> · ' + escapeHtml(item.at || '') + '</span></li>';
     }));
     el['handled-list'].innerHTML = items.join('');
+  }
+
+  // 失败原因是错误码（后端不送中文），在这里翻成人话
+  var FAILURE_KEYS = {
+    'merge.source_missing': 'reason.sourceMissing',
+    'merge.target_missing': 'reason.targetMissing',
+    'merge.copy_failed': 'reason.copyFailed',
+    'merge.delete_failed': 'reason.deleteFailed',
+    'merge.same_book': 'reason.sameBook',
+  };
+
+  function failureReasonText(item) {
+    var key = FAILURE_KEYS[item.error];
+    if (key) return t(key, item.error);
+    return item.message || item.error || '';
   }
 
   // ---------------------------------------------------------------- 合并预览 / 执行
@@ -876,7 +959,7 @@
   function planHtml(plan) {
     var warnings = [
       t('plan.warnDrop', '同名格式不会被复制：源书的同名文件会被丢弃，留下的是保留项的那一份。'),
-      t('plan.warnMigrate', '源记录的收藏/在读/阅读进度/评分/书单不会被迁移（工具箱删除不清理关联数据）。'),
+      t('plan.warnMigrate', '源记录的收藏/在读/阅读进度/评分/书单会随删除**一起消失**，不会迁移到保留项。'),
     ];
     var steps = (plan.steps || []).map(function (step) {
       return '<li>' +
@@ -906,7 +989,9 @@
         return '<li>' + escapeHtml(text) + '</li>';
       }).join('') + '</ul>' +
       '<label class="bd-check">' +
-        '<input type="checkbox" data-delete-source checked>' +
+        // **默认不勾**：删除是不可逆的（同名格式那一份直接丢弃、用户数据一起没了），
+        // 默认值不该是破坏性的那一个。要删就得自己勾一下。
+        '<input type="checkbox" data-delete-source>' +
         '<span>' + escapeHtml(t('plan.deleteSource',
           '同时删除重复记录（不勾则只合并格式，保留两条记录，之后可自行处理）')) + '</span>' +
       '</label>' +
@@ -939,11 +1024,19 @@
         return;
       }
       var data = resp.data || {};
-      // 兜底：字段缺失时显示 0，而不是把 undefined 甩到用户脸上
-      notify(t('plan.applied', '已合并：复制 {m} 个格式，删除 {d} 条重复记录')
-        .replace('{m}', data.moved_total || 0)
-        .replace('{d}', (data.removed_ids || []).length),
-        'success');
+      // 部分失败必须说出来：后端在"部分成功"时仍回 err=ok，只把这几个数放在 data 里。
+      // 以前这里只看 moved_total / removed_ids，5 本里失败 3 本也显示成完全成功。
+      var moved = data.moved_total || 0;
+      var removed = (data.removed_ids || []).length;
+      if (data.failed) {
+        notify(t('plan.appliedPartial',
+          '已合并：复制 {m} 个格式，删除 {d} 条重复记录；{f} 条失败（详见「本次已处理」）')
+          .replace('{m}', moved).replace('{d}', removed).replace('{f}', data.failed),
+          'error');
+      } else {
+        notify(t('plan.applied', '已合并：复制 {m} 个格式，删除 {d} 条重复记录')
+          .replace('{m}', moved).replace('{d}', removed), 'success');
+      }
       var done = state.active ? state.active.index : null;
       state.active = null;
       state.plan = null;

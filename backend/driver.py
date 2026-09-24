@@ -5,9 +5,11 @@
 
 - `load_records()`  —— 分批读全库（`get_data_as_dict` + `format_abspath` 算体积）
 - `run_scan()`      —— 跑引擎、组装报告
-- `merge_group()`   —— **唯一的写操作**：把重复项并进保留项，可选删掉源记录
+- `merge_group()`   —— 把重复项并进保留项，可选删掉源记录（写操作，先核对存在性再动手）
+- `delete_book()`   —— 单删一本（写操作；调用方是 `write_ops.execute_delete`）
 
-字段口径全部按宿主实测（键名踩过的坑写在 `load_records` 的注释里）。
+字段口径全部按宿主实测（键名踩过的坑写在 `load_records` 的注释里），
+**出参键名统一成引擎口径**（`cover → has_cover`、`comments → comments_present`）。
 """
 import json
 import logging
@@ -73,6 +75,11 @@ def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=
     - 未评分是数值 `0`，不是缺键
     - 封面看 `cover` 布尔键；取不到时回落 `CoreAPI.calibre.cover()`（慢，只在必要时）
 
+    **出参的键名是引擎口径，不是宿主口径**（这里踩过一次：宿主给的是 `cover`，
+    而评分/对照层读的是 `has_cover`，两边各写各的，于是"封面"这一项永远被判缺失、
+    字段齐全的书被扣掉 2/3 权重，评分从 92 掉到 83）。转换只在这一个地方做：
+    `cover → has_cover`、`comments → comments_present`。
+
     :return: (records, notes)；notes 记录跳过的书与原因，用于在报告里如实交代。
     """
     records = []
@@ -110,6 +117,9 @@ def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=
                 'added': _added_at(book),
                 'isbn': book.get('isbn') or '',
                 'comments': book.get('comments') or '',
+                # 评分/对照层要看的就是这两个名字（宿主侧叫 cover / comments，
+                # 转换只在这一处做，别再让两边各写各的）
+                'comments_present': bool((book.get('comments') or '').strip()),
                 'tags': _as_list(book.get('tags') or book.get('tag')),
                 'series': book.get('series') or '',
                 'series_index': book.get('series_index'),
@@ -118,7 +128,7 @@ def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=
                 'languages': _as_list(book.get('languages')),
                 'translators': _as_list(book.get('translators')),
                 'rating': book.get('rating') or 0,
-                'cover': bool(book.get('cover')),
+                'has_cover': bool(book.get('cover')),
                 'collector_id': book.get('collector_id'),
                 'collector_name': book.get('collector') or '',
                 'sole': bool(book.get('sole')),
@@ -170,78 +180,104 @@ def run_scan(api, book_ids=None, threshold=DEFAULT_THRESHOLD, scope_note='',
     return built
 
 
-# --------------------------------------------------------------------------- 合并
+# --------------------------------------------------------------------------- 合并与删除
+#
+# 这一段是**唯一会改书库**的地方，所以规则写得比别处死：先核对存在性 → 再复制 → 最后才删。
+# 任何一步不确定就不删记录。查重工具的破坏面就是"删"，宁可少合并一次，
+# 也不能出现"删掉了、没复制、界面还说成功"。
 
 
-def preview_merge(api, records, keeper_id):
-    """合并预览：不写任何东西，只算"会发生什么"。
+def _available_formats(api, book_id):
+    """书库里这本书现有的格式（大写集合）；书不存在返回 None。"""
+    books = api.calibre.get_data_as_dict([book_id]) or []
+    if not books:
+        return None
+    return set(str(f).upper() for f in (books[0].get('available_formats') or []))
 
-    这一步存在的理由是**同名格式不会被复制**：`merge_book_formats` 只复制目标书缺少的
-    格式（`base_tool.py:265` 的 `new_fmts = src_fmts - tgt_fmts`），所以"重复格式的那一份"
-    会被直接丢弃。用户必须在动手前看到这份清单，而不是事后才发现少了一个版本。
-    """
-    by_id = {r['id']: r for r in records}
-    target = by_id.get(keeper_id)
-    if target is None:
-        return {'error': 'keeper.missing'}
 
-    target_formats = set(f.upper() for f in (target.get('formats') or []))
-    moved, dropped, sources = [], [], []
-    for record in records:
-        if record['id'] == keeper_id:
-            continue
-        source_formats = set(f.upper() for f in (record.get('formats') or []))
-        sources.append({
-            'id': record['id'],
-            'title': record.get('title') or '',
-            'formats': sorted(source_formats),
-        })
-        for fmt in sorted(source_formats - target_formats):
-            moved.append({'source_id': record['id'], 'format': fmt})
-        for fmt in sorted(source_formats & target_formats):
-            dropped.append({'source_id': record['id'], 'format': fmt})
+def _format_on_disk(api, book_id, fmt):
+    """这个格式文件是否真的躺在磁盘上（宿主 add_format 之前只判这个，不会抛错）。"""
+    try:
+        path = api.calibre.format_abspath(book_id, fmt)
+    except Exception as err:  # noqa: BLE001
+        logging.warning('[book_dedup] format_abspath(%s, %s) failed: %s', book_id, fmt, err)
+        return False
+    return bool(path) and os.path.exists(path)
 
-    return {
-        'keeper_id': keeper_id,
-        'keeper_title': target.get('title') or '',
-        'keeper_formats': sorted(target_formats),
-        'sources': sources,
-        'moved': moved,
-        'dropped': dropped,
-        'reclaimable_bytes': keeper.reclaimable_bytes(records, keeper_id),
-        'disk_waste_bytes': keeper.duplicate_disk_waste(records, keeper_id),
-    }
+
+def book_exists(api, book_id):
+    """这本书现在还在不在书库。报告可能是几天前扫的，期间它可能在别处被删/并入。"""
+    try:
+        return bool(api.calibre.get_data_as_dict([book_id]) or [])
+    except Exception as err:  # noqa: BLE001
+        logging.warning('[book_dedup] book_exists(%s) failed: %s', book_id, err)
+        return False
 
 
 def merge_group(api, source_id, target_id, delete_source=True):
-    """把 `source_id` 并入 `target_id`。**本工具唯一的写操作。**
+    """把 `source_id` 并入 `target_id`。
 
-    两件事，分开记账：
+    **顺序就是安全策略**：
 
-    1. `merge_formats(source, target)` —— 复制源书target缺失的格式文件
-    2. 可选 `delete_book(source)` —— 删掉源记录
+    1. 两本书都还在书库吗？不在就中止（不复制、不删除）
+    2. 只复制目标书缺的格式
+    3. 复制成功（或确实没什么可复制的）才删源记录
 
-    :return: ``{'merged': [...], 'deleted': bool, 'notes': [...]}``
+    :return: ``{'merged': [...], 'deleted': bool, 'notes': [...], 'error': ...}``
 
     已知限制（写进返回值与日志，不假装没这回事）：
 
-    - **同名格式不会复制**：两本都是 EPUB 时，源书那份会被丢弃（看到的是 target 的版本）
-    - **工具箱的删除不清理关联数据**：`BaseTool.delete_book_by_id()` 只删 `Item`
-      （上游 issue #82 未修），收藏/在读/进度/评分/书单会留下悬空行
+    - **同名格式不会复制**：两本都是 EPUB 时，源书那份会被丢弃（看到的是 target 的版本）。
+      这一步由 `merge_plan` 的预览提前摆给用户看。
+    - **源记录的用户数据不会被迁移**：宿主删除会级联清理它们（收藏/在读/进度/评分/书评/
+      共读记录/书单关联，见上游 PoxenStudio/mybooks#82 的修复 `webserver/base/book_data_cascade.py`），
+      但那是**删除不是迁移**——不会搬到保留项上。
     """
-    notes = []
-    merged = []
     if int(source_id) == int(target_id):
         return {'merged': [], 'deleted': False, 'notes': ['same_book'],
                 'error': 'merge.same_book'}
 
-    try:
-        merged = api.calibre.merge_formats(source_id, target_id) or []
-    except Exception as err:  # noqa: BLE001 —— 宿主抛 RuntimeError("没有可合并的格式")
-        message = str(err)
-        logging.info('[book_dedup] merge_formats(%s->%s): %s', source_id, target_id, message)
+    # --- 1. 存在性核对（review 修复：这一步以前没有，保留项被别处删掉时会把源记录删光）
+    source_formats = _available_formats(api, source_id)
+    if source_formats is None:
+        return {'merged': [], 'deleted': False, 'notes': ['source_missing'],
+                'error': 'merge.source_missing'}
+    target_formats = _available_formats(api, target_id)
+    if target_formats is None:
+        return {'merged': [], 'deleted': False, 'notes': ['target_missing'],
+                'error': 'merge.target_missing'}
+
+    # --- 2. 只复制目标书缺的格式
+    missing = source_formats - target_formats
+    notes = []
+    merged = []
+    if missing:
+        try:
+            merged = sorted(str(f).upper()
+                            for f in (api.calibre.merge_formats(source_id, target_id) or []))
+        except Exception as err:  # noqa: BLE001
+            # **不能在这里继续删源记录**：宿主会为"来源/目标书籍不存在"抛同一个
+            # RuntimeError（base_tool.py:249-256），而那种情况下删除就是纯数据丢失
+            logging.error('[book_dedup] merge_formats(%s->%s) failed: %s',
+                          source_id, target_id, err)
+            return {'merged': [], 'deleted': False, 'notes': ['copy_failed'],
+                    'error': 'merge.copy_failed', 'message': str(err)}
+        if not merged:
+            # 宿主对"格式文件在磁盘上找不到"是 warning 后 continue（不抛错），所以会静默返回空。
+            # 只有那些文件**确实不在磁盘上**时才算"没什么可丢的"，否则一律不删。
+            on_disk = [fmt for fmt in sorted(missing) if _format_on_disk(api, source_id, fmt)]
+            if on_disk:
+                logging.error('[book_dedup] 有格式没复制成功，中止删除: %s -> %s (%s)',
+                              source_id, target_id, on_disk)
+                return {'merged': [], 'deleted': False, 'notes': ['copy_failed'],
+                        'error': 'merge.copy_failed',
+                        'message': '未复制成功的格式: %s' % ', '.join(on_disk)}
+            notes.append('format_files_missing')
+    else:
+        # 两本的格式完全一样 → 无事可做（同名格式本来就不会复制）。这不是失败。
         notes.append('no_new_formats')
 
+    # --- 3. 到这里复制这步是确定的，才允许删源记录
     deleted = False
     if delete_source:
         try:
@@ -252,8 +288,7 @@ def merge_group(api, source_id, target_id, delete_source=True):
             return {'merged': merged, 'deleted': False, 'notes': notes,
                     'error': 'merge.delete_failed', 'message': str(err)}
 
-    return {'merged': sorted(str(f).upper() for f in merged),
-            'deleted': deleted, 'notes': notes}
+    return {'merged': merged, 'deleted': deleted, 'notes': notes}
 
 
 def delete_book(api, book_id):
@@ -490,8 +525,8 @@ def merge_plan(api, members, keeper_id):
     1. **同名格式不会被复制**：`merge_book_formats` 只复制目标书缺的格式
        （`base_tool.py:265` 的 `new_fmts = src_fmts - tgt_fmts`），所以两本都有 EPUB 时，
        源书那份会被丢弃，留下的是 keeper 的版本。
-    2. **源记录的关联数据不会被迁移**：工具箱的删除只清 `Item`
-       （上游 issue #82 未修），收藏/在读/进度/评分/书单会留下悬空行。
+    2. **源记录的关联数据不会被迁移**：宿主删除会级联清理收藏/在读/进度/评分/书评/书单关联
+       （上游 issue #82 的修复），但那是删除不是迁移——不会搬到保留项上。
     """
     by_id = {r['id']: r for r in members}
     target = by_id.get(keeper_id)

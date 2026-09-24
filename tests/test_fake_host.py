@@ -281,6 +281,13 @@ class FakeApi(object):
     所以 `new_api` 指回自己 —— `FakeCalibre` 上已经实现了那些"库方法"。
     不这样做的话，`CalibreAPI.all_book_ids()`（转发 `owner.get_all_book_ids()`，
     后者读 `self.db.new_api`）就会 AttributeError，看起来像工具坏了。
+
+    **库方法要在这里转一手**：真宿主里 `_owner.db` 是 calibre 的 LibraryDatabase，
+    工具走 `api.calibre.*` 时真正被调用的是它（`core_api.py:172/330`）。
+    这一类转发曾经是**漏的**——`get_data_as_dict` 只有 `FakeCalibre` 上有，
+    于是"经 CoreAPI 读一本书"在替身里必然 AttributeError，而真宿主上是好的；
+    0.1.3 那个"保留项已被删掉时把源记录删光"的 bug 就藏在这个缝里
+    （工具把异常当成"无需合并"）。补上转发，替身才站在宿主的位置上。
     """
 
     def __init__(self, books):
@@ -289,6 +296,12 @@ class FakeApi(object):
     @property
     def new_api(self):
         return self.calibre
+
+    def get_data_as_dict(self, ids):
+        return self.calibre.get_data_as_dict(ids)
+
+    def format_abspath(self, book_id, fmt, index_is_id=True):
+        return self.calibre.format_abspath(book_id, fmt)
 
 
 def load_tool(tmp_root, api, shared_root=None):
@@ -497,12 +510,16 @@ class TestToolWiring(unittest.TestCase):
                              len(entry['members']) > 2)
 
     def test_index_preview_caps_at_two(self):
-        """超过 2 本的组：列表只给 2 个书名（其余点开抽屉看全部）。"""
+        """超过 2 本的组：列表只给 2 个书名（其余点开抽屉看全部）。
+
+        5 条记录的书名必须**完全一样**：写成「同一本书0..4」的话，它们只差尾部一个数字，
+        属于"同系列不同卷"（`normalize.differs_only_by_serial`），本来就不该成组。
+        """
         records = []
         for position in range(5):
             record = {
                 'id': 100 + position,
-                'title': '同一本书%d' % position,
+                'title': '同一本书',
                 'authors': ['同一作者'],
                 'formats': ['EPUB'],
                 'size': 100,
@@ -531,6 +548,41 @@ class TestToolWiring(unittest.TestCase):
         self.assertEqual(entry['members'].__len__(), 5)
         self.assertEqual(len(entry['titles']), 2)
         self.assertTrue(entry['preview_truncated'])
+
+    def test_host_cover_and_comments_convert_to_engine_names(self):
+        """**回归（review P1）**：宿主给的是 `cover` / `comments`，引擎读的是
+        `has_cover` / `comments_present`。
+
+        两边曾经各写各的键名，后果是"封面"这一项永远被判缺失：一本字段齐全的书只有
+        83 分（应为 100），而且每本书的 missing_fields 里都挂着"封面"。
+        这条测试刻意**串起"宿主形状 → 评分结果"**——老测试之所以漏掉它，正是因为
+        引擎测试只用 `has_cover`、假宿主只用 `cover`，各自都测不出这个名字错位。
+
+        分数是钉死的：book 1 十二项全带 → 100；book 2 只有书名/作者/格式 → 8/21 = 38。
+        """
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(work_dir)
+        members = {}
+        for group in report['groups']:
+            for member in group['members']:
+                members[member['id']] = member
+
+        rich = members[1]          # make_books(): cover=True, comments='简介', 其余字段齐全
+        self.assertTrue(rich['has_cover'])
+        self.assertTrue(rich['comments_present'])
+        self.assertNotIn('has_cover', rich['missing_fields'])
+        self.assertNotIn('comments', rich['missing_fields'])
+        self.assertEqual(rich['meta_score'], 100)
+        # 简介正文不进报告（报告是 MB 级的），只带"有没有"这个布尔
+        self.assertNotIn('comments', rich)
+
+        poor = members[2]          # cover=False, comments=''
+        self.assertFalse(poor['has_cover'])
+        self.assertFalse(poor['comments_present'])
+        self.assertIn('has_cover', poor['missing_fields'])
+        self.assertIn('comments', poor['missing_fields'])
+        self.assertEqual(poor['meta_score'], 38)
+        self.assertGreater(rich['meta_score'], poor['meta_score'])
 
     def test_report_read_is_cached(self):
         """报告是 MB 级：`/group` 每点一行都会读一次，必须有解析缓存。"""
@@ -602,6 +654,110 @@ class TestMerge(unittest.TestCase):
             self.api, self.work_dir, position, keeper_id=5)
         self.assertIsNotNone(error)
         self.assertEqual(error['err'], 'keeper.not_in_group')
+
+    def test_plan_rejects_keeper_that_left_the_library(self):
+        """**回归（review P0）**：保留项已不在书库时，预览就该拒绝。
+
+        报告是跨重启持久化的，可能几天前扫的；而工具卡片上就有「打开书籍页」，
+        用户完全可能在期间把那本书删掉/并掉。
+        """
+        position, _group = self._group_index_of('三体')
+        del self.api.calibre.books[1]          # 用户在别处删掉了保留项
+        _plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, position, keeper_id=1)
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'keeper.missing')
+
+    def test_merge_aborts_when_keeper_left_the_library(self):
+        """**回归（review P0）**：保留项不在了 → 一条记录都不许删。
+
+        0.1.3 把 `merge_formats` 抛的"目标书籍不存在"当成"无需合并"，然后照样删源记录：
+        结果是源记录被删光、什么都没复制。假宿主此前也没复刻这条抛出路径
+        （`_owner.db.get_data_as_dict` 的转发是漏的），所以这个 bug 在测试里不可能发生。
+        """
+        position, group = self._group_index_of('三体')
+        source = [m['id'] for m in group['members'] if m['id'] != 1][0]
+        del self.api.calibre.books[1]
+
+        # 绕过预览直接执行（模拟"预览是几分钟前生成的、期间保留项没了"）
+        stale_plan = {
+            'keeper_id': 1, 'keeper_title': '三体', 'index': position,
+            'steps': [{'source_id': source, 'source_title': '三体（全集）', 'target_id': 1,
+                       'moved_formats': ['PDF'], 'dropped_formats': ['EPUB']}],
+            'moved_total': 1, 'dropped_total': 1,
+            'reclaimable_bytes': 0, 'disk_waste_bytes': 0,
+        }
+        result = self.write_ops.execute(self.api, self.work_dir, stale_plan)
+        self.assertNotEqual(result['err'], 'ok')
+        self.assertNotIn(('delete_book', source), self.api.calibre.calls)
+        self.assertIn(source, self.api.calibre.books)      # 源记录还在
+
+    def test_copy_failure_does_not_delete_source(self):
+        """复制真的抛错时不许删源记录——只有"确实没有可复制的格式"才允许删。"""
+        position, group = self._group_index_of('三体')
+        source = [m['id'] for m in group['members'] if m['id'] != 1][0]
+        plan, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, position, keeper_id=1)
+        self.assertTrue(plan['steps'][0]['moved_formats'])   # 确实有该复制的格式
+
+        def boom(source_id, target_id):
+            raise RuntimeError('磁盘写入失败')
+
+        self.api.calibre.merge_formats = boom
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
+        self.assertNotEqual(result['err'], 'ok')
+        self.assertNotIn(('delete_book', source), self.api.calibre.calls)
+        self.assertIn(source, self.api.calibre.books)
+
+    def test_identical_formats_still_merge(self):
+        """两本格式完全一样（无可复制项）仍要能合并删除——这条老路不能被安全修复堵死。"""
+        record = {'id': 6, 'title': '三体', 'authors': ['刘慈欣'],
+                  'available_formats': ['EPUB', 'MOBI'], 'isbn': '',
+                  'timestamp': '2026-06-01T00:00:00+00:00', '_paths': {}}
+        self.api.calibre.books[6] = record
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(work_dir)
+        position = self._index_of_members(report, {1, 2, 6})
+        plan, error = self.write_ops.build_plan(self.api, work_dir, position, keeper_id=1)
+        self.assertIsNone(error)
+        by_source = {step['source_id']: step for step in plan['steps']}
+        self.assertEqual(by_source[6]['moved_formats'], [])   # 与 keeper 的格式完全一致
+        self.assertEqual(by_source[2]['moved_formats'], ['PDF'])
+
+        result = self.write_ops.execute(self.api, work_dir, plan)
+        self.assertEqual(result['err'], 'ok')
+        self.assertNotIn(6, self.api.calibre.books)           # 同格式那本照样被删
+        self.assertIn(1, self.api.calibre.books)
+
+    def test_partial_failure_is_recorded(self):
+        """一组里有失败时：成功的照记，失败的要落进台账（界面据此如实显示）。"""
+        self.api.calibre.books[6] = {
+            'id': 6, 'title': '三体（全本）', 'authors': ['刘慈欣'],
+            'available_formats': ['EPUB'], 'isbn': '',
+            'timestamp': '2026-06-01T00:00:00+00:00', '_paths': {}}
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(work_dir)
+        position = self._index_of_members(report, {1, 2, 6})
+        plan, error = self.write_ops.build_plan(self.api, work_dir, position, keeper_id=1)
+        self.assertIsNone(error)
+        self.assertEqual(len(plan['steps']), 2)
+
+        del self.api.calibre.books[6]        # 其中一本在别处被删了
+        result = self.write_ops.execute(self.api, work_dir, plan)
+        self.assertEqual(result['err'], 'ok')                 # 部分成功仍是 ok
+        self.assertEqual(result['data']['failed'], 1)         # 但失败数必须如实回
+        self.assertEqual(result['data']['removed_ids'], [2])
+        failed = self.write_ops.read_failed_titles(work_dir)
+        self.assertEqual([f['id'] for f in failed], [6])
+        self.assertEqual(failed[0]['error'], 'merge.source_missing')
+
+    @staticmethod
+    def _index_of_members(report, wanted):
+        for index, group in enumerate(report['groups']):
+            if {m['id'] for m in group['members']} == set(wanted):
+                return index
+        raise AssertionError('找不到成员为 %s 的分组：%s' % (
+            wanted, [sorted(m['id'] for m in g['members']) for g in report['groups']]))
 
     def test_plan_rejects_bad_index(self):
         _plan, error = self.write_ops.build_plan(self.api, self.work_dir, 999)

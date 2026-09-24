@@ -76,6 +76,28 @@ def read_removed_titles(work_dir):
     return titles
 
 
+def read_failed_titles(work_dir):
+    """**没做成**的那几步（合并失败/被中止），供界面如实交代。
+
+    记账里一直有 `steps[].error`，但界面从不显示——5 本里失败 3 本时提示仍然是
+    "已合并：复制 N 个格式，删除 M 条重复记录"，用户以为全成了。现在按记账列出来。
+    """
+    failed = []
+    for entry in read_merged(work_dir):
+        for step in entry.get('steps') or []:
+            if not step.get('error'):
+                continue
+            failed.append({
+                'id': step.get('source_id'),
+                'title': step.get('source_title') or '',
+                'error': step.get('error'),
+                'message': step.get('message') or '',
+                'into': entry.get('keeper_title') or '',
+                'at': entry.get('at') or '',
+            })
+    return failed
+
+
 def append_merged(work_dir, entry):
     entries = read_merged(work_dir)
     entries.append(entry)
@@ -176,6 +198,11 @@ def execute_delete(api, work_dir, index_arg, book_id):
         return {'err': 'book.not_in_group', 'msg': '要删除的书必须是这一组里的成员'}
 
     title = target.get('title') or ''
+    # 报告可能是几天前扫的：书在别处被删掉时，别把宿主的"来源书籍不存在"丢给用户，
+    # 直接说清楚要重扫
+    if not driver.book_exists(api, wanted):
+        return {'err': 'book.missing',
+                'msg': '这本书已不在书库（可能已在别处被删除），请重新扫描'}
     try:
         driver.delete_book(api, wanted)
     except Exception as err:  # noqa: BLE001
@@ -275,11 +302,18 @@ def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
         recommendation['reasons'] = [{'code': 'manual'}]
         recommendation['rule'] = 'manual'
 
+    # 保留项必须**现在**还在书库。报告是跨重启持久化的，可能几天前扫的；期间用户很可能
+    # 正是在工具卡片上点"打开书籍页"把它删了/并了。这一步以前没有，后果是
+    # `merge_formats` 抛"目标书籍不存在"被当成"无需合并"，然后把源记录删光。
+    if not driver.book_exists(api, resolved_keeper):
+        return None, {'err': 'keeper.missing',
+                      'msg': '保留项已不在书库（可能已在别处被删除或合并），请重新扫描'}
+
     plan = driver.merge_plan(api, _to_engine_members(members), resolved_keeper)
     if plan.get('error'):
         return None, {'err': plan['error'], 'msg': '保留项不在成员里'}
     plan['index'] = int(index_arg)
-    plan['task_id'] = task_id or {}
+    plan['task_id'] = None if task_id in (None, '') else str(task_id)
     plan['recommendation'] = recommendation
     plan['members'] = members
     return plan, None

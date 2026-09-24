@@ -93,8 +93,3 @@ def score(record):
         return 0
     earned = sum(item['weight'] for item in detail.values() if item['present'])
     return int(earned / total * 100)
-
-
-def score_all(records):
-    """批量评分，返回 {book_id: 分数}。"""
-    return {record['id']: score(record) for record in records}
