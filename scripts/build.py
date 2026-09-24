@@ -173,10 +173,9 @@ def iter_payload():
 def build(out_dir, prune=False):
     """打包。
 
-    :param prune: 先清空输出目录。**默认不清**——`dist/` 里的 zip 是要入库分发的产物
-        （从仓库就能下载到"当时验过的那个包"），清空会把受版本控制的文件删掉，
-        于是每次打包都在工作区留下「一批已删除」。
-        只覆盖同名同版本的那个包，其它版本原样保留（它们就是发布历史）。
+    :param prune: 先清空输出目录。**默认不清**：`dist/` 是本地/发版用的中间产物
+        （发布的包在 GitHub Releases，仓库只放源码），默认只覆盖同名同版本那一份，
+        其它版本原样留着方便对照；发版前想只留一个包，再用 `--prune`。
     """
     manifest, errors = validate_source()
     crlf = check_line_endings()
@@ -267,7 +266,7 @@ def main():
     parser.add_argument('--check', action='store_true', help='只校验现有产物')
     parser.add_argument('--mytool', action='store_true', help='额外跑官方 mytool validate')
     parser.add_argument('--prune', action='store_true',
-                        help='先清空输出目录（默认不清：dist 里的包要入库分发）')
+                        help='先清空输出目录（默认只覆盖同版本那一份）')
     parser.add_argument('--keep', action='store_true',
                         help=argparse.SUPPRESS)     # 旧参数，现在是默认行为
     args = parser.parse_args()
@@ -296,7 +295,7 @@ def main():
         digest = hashlib.sha256(handle.read()).hexdigest()
     print('sha256：%s' % digest)
     print('大小：%.1f KB' % (os.path.getsize(archive) / 1024.0))
-    # 顺带把校验和写进 dist/SHA256SUMS.txt：从仓库下载 zip 的人要能自己核一遍
+    # 顺带把校验和写进 dist/SHA256SUMS.txt：发 Release 时把它贴进说明（本地文件不入库）
     sums = os.path.join(args.out, 'SHA256SUMS.txt')
     with open(sums, 'w', encoding='utf-8', newline='\n') as handle:
         handle.write('%s  %s\n' % (digest, os.path.basename(archive)))

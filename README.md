@@ -11,12 +11,30 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 ## 安装
 
 1. 在 MyBooks 里开启开发者模式（`ENABLE_TOOLBOX_DEV_MODE`）
-2. 工具箱 → 上传工具包 → 选择工具包 zip
-   （**仓库里的 `dist/book_dedup-<版本>.zip` 就是可直接用的那一份**，
-   校验和见 `dist/SHA256SUMS.txt`；想自己打见下方「开发」）
+2. 到 [Releases](https://github.com/shiningsprk-arch/tool_book_dedup/releases) 下载
+   `book_dedup-<版本>.zip`，工具箱 → 上传工具包 → 选择这个 zip
+   （仓库本身只放源码；zip 由 `scripts/build.py` 从源码打出，见下方「开发」）
 3. **安装/更新需要重启 MyBooks 才生效**（禁用/启用即时生效）
 4. 装完如果界面看起来还是旧版，硬刷一次工具页——宿主的工具前端资源 handler 不设缓存头，
    但本工具的 `index.html` 里资源带 `?v=<revision>`，改版本时会自动换掉
+
+### 想核对下载到的包
+
+```bash
+# Windows
+certutil -hashfile book_dedup-0.1.4.zip SHA256
+# Linux / macOS
+sha256sum book_dedup-0.1.4.zip
+```
+
+sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
+逐字节可复现的：固定时间戳/条目顺序/权限位/zip 头的 `create_system`，文本统一 LF）：
+
+```bash
+git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
+cd tool_book_dedup
+python scripts/build.py            # → dist/book_dedup-0.1.4.zip，并打印 sha256
+```
 
 ## 怎么用
 
@@ -122,10 +140,10 @@ python scripts/smoke_offline.py --all      # 干净库 0 误报 + 注入库全�
 python scripts/make_preview.py
 python -m http.server 8765 -d dev/preview  # http://127.0.0.1:8765/index.html
 
-# 打包（清理字节码 + 打包 + 形状校验 + 写 dist/SHA256SUMS.txt）
+# 打包（清理字节码 + 打包 + 形状校验，并在 dist/ 写一份 SHA256SUMS.txt）
 python scripts/build.py [--check] [--mytool]
-#   dist/ 里的包是**入库分发**的产物：默认不清空、只覆盖同版本那一份
-#   （`--prune` 才会先清空输出目录）
+#   dist/ 不入库（仓库只放源码）：这个包就是发到 GitHub Releases 的那一份
+#   默认不动输出目录里已有的其它版本；发版前想只留一个包就用 --prune
 
 # 重新生成图标 / 三语文案
 python scripts/make_icon.py
