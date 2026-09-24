@@ -170,7 +170,14 @@ def iter_payload():
                 yield relative, disk
 
 
-def build(out_dir, keep=False):
+def build(out_dir, prune=False):
+    """打包。
+
+    :param prune: 先清空输出目录。**默认不清**——`dist/` 里的 zip 是要入库分发的产物
+        （从仓库就能下载到"当时验过的那个包"），清空会把受版本控制的文件删掉，
+        于是每次打包都在工作区留下「一批已删除」。
+        只覆盖同名同版本的那个包，其它版本原样保留（它们就是发布历史）。
+    """
     manifest, errors = validate_source()
     crlf = check_line_endings()
     if crlf:
@@ -181,7 +188,7 @@ def build(out_dir, keep=False):
             print('  ✗ %s' % error)
         raise SystemExit('源目录校验失败，未打包')
 
-    if os.path.exists(out_dir) and not keep:
+    if prune and os.path.exists(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -259,7 +266,10 @@ def main():
     parser.add_argument('--out', default=os.path.join(REPO_ROOT, 'dist'))
     parser.add_argument('--check', action='store_true', help='只校验现有产物')
     parser.add_argument('--mytool', action='store_true', help='额外跑官方 mytool validate')
-    parser.add_argument('--keep', action='store_true', help='保留 dist 里已有的包')
+    parser.add_argument('--prune', action='store_true',
+                        help='先清空输出目录（默认不清：dist 里的包要入库分发）')
+    parser.add_argument('--keep', action='store_true',
+                        help=argparse.SUPPRESS)     # 旧参数，现在是默认行为
     args = parser.parse_args()
 
     manifest = load_manifest()
@@ -273,7 +283,7 @@ def main():
     else:
         removed = clean_bytecode()
         print('清理字节码：%d 处' % removed)
-        archive, entries, problems, sha = build(args.out, keep=args.keep)
+        archive, entries, problems, sha = build(args.out, prune=args.prune)
         print('打包：%s' % archive)
         print('条目：%d' % len(entries))
 
@@ -286,6 +296,11 @@ def main():
         digest = hashlib.sha256(handle.read()).hexdigest()
     print('sha256：%s' % digest)
     print('大小：%.1f KB' % (os.path.getsize(archive) / 1024.0))
+    # 顺带把校验和写进 dist/SHA256SUMS.txt：从仓库下载 zip 的人要能自己核一遍
+    sums = os.path.join(args.out, 'SHA256SUMS.txt')
+    with open(sums, 'w', encoding='utf-8', newline='\n') as handle:
+        handle.write('%s  %s\n' % (digest, os.path.basename(archive)))
+    print('校验和：%s' % os.path.relpath(sums, REPO_ROOT))
 
     if args.mytool:
         ok, output = run_mytool(archive)
