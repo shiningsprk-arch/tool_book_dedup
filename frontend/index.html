@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>查重合并</title>
-  <link rel="stylesheet" href="lib/theme.css?v=0.1.5">
-  <link rel="stylesheet" href="lib/book_dedup.css?v=0.1.5">
+  <link rel="stylesheet" href="lib/theme.css?v=0.1.6">
+  <link rel="stylesheet" href="lib/book_dedup.css?v=0.1.6">
 </head>
 <body>
   <noscript>本工具需要 JavaScript。</noscript>
@@ -74,6 +74,20 @@
       <ul class="bd-handled" id="handled-list"></ul>
     </section>
 
+    <section class="bd-card" id="ignored-card" hidden>
+      <h2 class="bd-card-title">
+        <span data-i18n="ignore.title">已忽略（不是重复）</span>
+        <span class="bd-hint" id="ignored-count"></span>
+      </h2>
+      <p class="bd-hint" data-i18n="ignore.hint">
+        这些配对以后查重不再报出来。撤销之后重新查重它们会再出现。
+      </p>
+      <ul class="bd-handled" id="ignored-list"></ul>
+      <div class="bd-actions">
+        <button id="btn-unignore-all" class="bd-btn" data-i18n="ignore.undoAll">全部撤销</button>
+      </div>
+    </section>
+
     <p class="bd-hint bd-credit" data-i18n="app.footer">
       查重判定为 clean-room 实现，设计思路参考 BookOrbit（AGPL-3.0）。
     </p>
@@ -89,6 +103,6 @@
   <div class="bd-toasts" id="toasts" aria-live="polite"></div>
 
   <script src="/static/toolbox-bridge.js"></script>
-  <script src="app.js?v=0.1.5"></script>
+  <script src="app.js?v=0.1.6"></script>
 </body>
 </html>

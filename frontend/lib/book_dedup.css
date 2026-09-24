@@ -371,6 +371,11 @@
   font-size: 13px;
 }
 
+/* 已忽略（不是重复）：列表项右侧一个撤销键，其它与"已处理"同款 */
+.bd-handled li .bd-btn { margin-left: 8px; }
+
+.bd-card-title .bd-hint { font-weight: 400; margin-left: 6px; }
+
 .bd-credit {
   text-align: center;
   margin-top: 20px;

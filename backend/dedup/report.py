@@ -110,6 +110,11 @@ def build_report(records, pairs, groups, threshold, stats, scope_note=''):
             'weak_groups': sum(1 for g in out_groups if g['confidence'] == 'weak'),
             # 因为"只差一个卷号/期号"被排除的候选对（不静默吞掉，界面上如实说明）
             'serial_excluded': int(stats.get('skipped_serial') or 0),
+            # 因为"一边是实体书、一边是电子书"被排除的候选对（用户口径：不跨类判断）
+            'cross_type_excluded': int(stats.get('skipped_cross_type') or 0),
+            # 本次因为忽略名单而没有成组的候选对，以及名单里已经失效的条目数
+            'ignored_excluded': int(stats.get('ignored_excluded') or 0),
+            'ignored_stale': int(stats.get('ignored_stale') or 0),
         },
         'groups': out_groups,
     }

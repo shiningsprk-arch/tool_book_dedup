@@ -1211,6 +1211,238 @@ class TestPartialMergeSelection(unittest.TestCase):
         self.assertIn('metadata', [row['field'] for row in rebuilt['rows']])
 
 
+class TestIgnoreList(unittest.TestCase):
+    """忽略名单：记录、生效、撤销、失效剔除，以及"整组被忽略的行不再显示"。"""
+
+    def setUp(self):
+        FakeBackgroundService._tasks = {}
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_ignore_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_ignore_shared_')
+        self.api = FakeApi(make_books())
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
+        self.tool_class = self.tool.BookDedupTool
+        self.tool_class._last_task_id = None
+        self.tool_class._accepted = False
+        self.built, self.work_dir = scan(self.tool, self.driver, self.api)
+
+    def _group_index_of(self, title):
+        report = self.driver.read_report(self.work_dir)
+        for position, group in enumerate(report['groups']):
+            for member in group['members']:
+                if member['title'] == title:
+                    return position, group
+        raise AssertionError('找不到分组：%s' % title)
+
+    def _members(self, position):
+        return self.write_ops.group_members(self.work_dir, position)[0]
+
+    def test_ignore_records_pairs_with_fingerprints(self):
+        position, _group = self._group_index_of('活着')
+        added = self.write_ops.add_ignored(
+            self.shared, self._members(position))
+        self.assertEqual(added, 1)                     # 两本一组 = 一对
+        entries = self.write_ops.read_ignored(self.shared)
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual((entry['a'], entry['b']), (3, 4))
+        # 指纹两侧都存（用来察觉 id 换了主人），书名也存（界面列表要能读）
+        self.assertEqual(sorted(entry['sigs']), ['3', '4'])
+        self.assertEqual(entry['titles']['4'], '活着')
+        # 重复点一次不会写第二条
+        self.assertEqual(self.write_ops.add_ignored(self.shared, self._members(position)), 0)
+
+    def test_ignored_pair_is_gone_on_next_scan(self):
+        """记下之后重新扫描：这一对不再成组，被排除的对数如实入 summary。"""
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+
+        built = self.driver.run_scan(
+            self.api, self.api.calibre.all_book_ids(), threshold=0.85,
+            ignored_entries=self.write_ops.read_ignored(self.shared),
+            prune_ignored=lambda by_id: self.write_ops.live_ignored(self.shared, by_id))
+        self.assertEqual(built['summary']['ignored_excluded'], 1)
+        self.assertEqual(built['summary']['group_count'],
+                         self.built['summary']['group_count'] - 1)
+        for group in built['groups']:
+            self.assertNotEqual(sorted(m['id'] for m in group['members']), [3, 4])
+
+    def test_ignore_only_hides_that_pair(self):
+        """忽略一对不会连累同一本书的其它配对（记整本才会误伤）。"""
+        self.api.calibre.books[6] = {
+            'id': 6, 'title': '活着', 'authors': ['余华'], 'available_formats': ['EPUB'],
+            'isbn': '', 'timestamp': '2026-06-01T00:00:00+00:00', '_paths': {}}
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        report = self.driver.read_report(work_dir)
+        position = None
+        for index, group in enumerate(report['groups']):
+            if {m['id'] for m in group['members']} == {3, 4, 6}:
+                position = index
+        self.assertIsNotNone(position, '三本一组没成组')
+        members = self.write_ops.group_members(work_dir, position)[0]
+        # 只忽略 3-4 这一对（不是整组）
+        self.write_ops.add_ignored(self.shared, [m for m in members if m['id'] in (3, 4)])
+        built = self.driver.run_scan(
+            self.api, self.api.calibre.all_book_ids(), threshold=0.85,
+            ignored_entries=self.write_ops.read_ignored(self.shared))
+        self.assertEqual(built['summary']['ignored_excluded'], 1)
+        # 被忽略的 3-4 断开了，但 4 与 6 仍成对 → 组还在，只是**缩小**成 {4, 6}
+        # （这正是"只记这一对"与"记整本"的区别：3 不会被永久藏掉）
+        groups = [sorted(m['id'] for m in g['members']) for g in built['groups']]
+        self.assertIn([4, 6], groups)
+        self.assertNotIn(3, [book_id for group in groups for book_id in group])
+
+    def test_fully_ignored_row_disappears_from_list(self):
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        index = self.driver.read_index(self.work_dir)
+        keys = self.tool.load_ignored_keys(self.tool_class())
+        rows = self.tool._visible_groups(index['groups'], set(), keys)
+        self.assertNotIn(position, [row['index'] for row in rows])
+        # 别的组不受影响（'活着' 那一组本身是 index 0，被忽略的就是它）
+        self.assertEqual(position, 0, '前提：#3/#4 是 index 0 那一组')
+        self.assertIn(1, [row['index'] for row in rows])
+
+    def test_partially_ignored_row_is_flagged(self):
+        self.api.calibre.books[6] = {
+            'id': 6, 'title': '活着', 'authors': ['余华'], 'available_formats': ['EPUB'],
+            'isbn': '', 'timestamp': '2026-06-01T00:00:00+00:00', '_paths': {}}
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        index = self.driver.read_index(work_dir)
+        position = None
+        for row in index['groups']:
+            if set(row['members']) == {3, 4, 6}:
+                position = row['index']
+        members = self.write_ops.group_members(work_dir, position)[0]
+        self.write_ops.add_ignored(self.shared, [m for m in members if m['id'] in (3, 4)])
+        keys = self.tool.load_ignored_keys(self.tool_class())
+        rows = self.tool._visible_groups(index['groups'], set(), keys)
+        row = [item for item in rows if item['index'] == position][0]
+        self.assertEqual(row['ignored_pairs'], 1)        # 三对里忽略了一对
+
+    def test_unignore_restores_the_group(self):
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        self.assertEqual(self.write_ops.remove_ignored(self.shared, [(3, 4)]), 1)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+        built = self.driver.run_scan(
+            self.api, self.api.calibre.all_book_ids(), threshold=0.85,
+            ignored_entries=self.write_ops.read_ignored(self.shared))
+        self.assertEqual(built['summary']['ignored_excluded'], 0)
+
+    def test_unignore_all(self):
+        position, _group = self._group_index_of('活着')
+        another, group = self._group_index_of('三体')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        self.write_ops.add_ignored(self.shared, group['members'])
+        self.assertEqual(len(self.write_ops.read_ignored(self.shared)), 2)
+        self.assertEqual(self.write_ops.remove_ignored(self.shared, all_entries=True), 2)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_deleted_book_prunes_its_entries(self):
+        """书被删掉之后，那条忽略记录没有意义了 → 扫描时剔掉并回写。"""
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        del self.api.calibre.books[4]
+        built = self.driver.run_scan(
+            self.api, self.api.calibre.all_book_ids(), threshold=0.85,
+            ignored_entries=self.write_ops.read_ignored(self.shared),
+            prune_ignored=lambda by_id: self.write_ops.live_ignored(self.shared, by_id))
+        self.assertEqual(built['summary']['ignored_stale'], 1)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_reused_book_id_is_not_a_whitelist(self):
+        """**同 id 换了另一本书**：指纹对不上 → 不算数（否则白名单会误伤新书）。
+
+        calibre 的新书拿 `max(id)+1`，而本工具的合并会删记录——删掉的 id 完全可能
+        被一本无关的新书占上，那时"只存 id"的白名单就会静默把它当成已忽略。
+        """
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        self.api.calibre.books[4] = {
+            'id': 4, 'title': '完全无关的新书', 'authors': ['另一个人'],
+            'available_formats': ['EPUB'], 'isbn': '',
+            'timestamp': '2026-07-01T00:00:00+00:00', '_paths': {}}
+        built = self.driver.run_scan(
+            self.api, self.api.calibre.all_book_ids(), threshold=0.85,
+            ignored_entries=self.write_ops.read_ignored(self.shared),
+            prune_ignored=lambda by_id: self.write_ops.live_ignored(self.shared, by_id))
+        self.assertEqual(built['summary']['ignored_stale'], 1)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_ignored_rows_for_ui(self):
+        position, _group = self._group_index_of('活着')
+        self.write_ops.add_ignored(self.shared, self._members(position))
+        rows = self.write_ops.ignored_rows(self.shared)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['a'], 3)
+        self.assertEqual(rows[0]['b'], 4)
+        self.assertEqual(rows[0]['a_title'], 'To Live')
+        self.assertEqual(rows[0]['b_title'], '活着')
+        self.assertTrue(rows[0]['at'])
+
+    def test_ignore_list_is_written_under_the_lock(self):
+        """忽略名单也是"读→改→写"，必须持写锁（双击忽略不能丢条目）。"""
+        path = os.path.join(ROOT, 'backend', 'write_ops.py')
+        with open(path, 'r', encoding='utf-8') as handle:
+            source = handle.read()
+        for name in ('def add_ignored(', 'def remove_ignored(', 'def _write_ignored('):
+            index = source.index(name)
+            following = source.find('\ndef ', index + 1)
+            body = source[index:following if following > 0 else len(source)]
+            self.assertIn('with _WRITE_LOCK', body, '%s 没有持锁' % name)
+
+
+class TestTypeGate(unittest.TestCase):
+    """**不跨实体书/电子书判断**，从宿主键名一路验到分组结果。"""
+
+    def setUp(self):
+        FakeBackgroundService._tasks = {}
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_type_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_type_shared_')
+        self.api = FakeApi(make_books())
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
+
+    def test_book_type_key_is_read_from_the_hash_column(self):
+        """宿主的自定义列键名带 `#`（`constants.py:33` 的 `CALIBRE_COLUMN_BOOK_TYPE`），
+        读裸键会恒为 None——0.1.0–0.1.5 就是这么漏的，实体书全被当成电子书。"""
+        reader = self.driver._book_type
+        self.assertEqual(reader({'#book_type': 1}), 1)
+        self.assertEqual(reader({'#book_type': 0}), 0)
+        self.assertEqual(reader({'book_type': 1}), 1)      # 兼容裸键
+        self.assertEqual(reader({'#book_type': '1'}), 1)
+        self.assertEqual(reader({}), 0)
+        self.assertEqual(reader({'#book_type': None, 'book_type': 1}), 1)
+
+    def test_cross_type_books_do_not_group(self):
+        books = {
+            1: {'id': 1, 'title': '活着', 'authors': ['余华'], 'available_formats': ['EPUB'],
+                'isbn': '9787506365437', '#book_type': 0,
+                'timestamp': '2026-01-01T00:00:00+00:00', '_paths': {}},
+            2: {'id': 2, 'title': '活着', 'authors': ['余华'], 'available_formats': [],
+                'isbn': '9787506365437', '#book_type': 1,
+                'timestamp': '2026-02-01T00:00:00+00:00', '_paths': {}},
+        }
+        api = FakeApi(books)
+        built = self.driver.run_scan(api, api.calibre.all_book_ids(), threshold=0.85)
+        self.assertEqual(built['summary']['group_count'], 0)
+        self.assertEqual(built['summary']['cross_type_excluded'], 1)
+
+    def test_same_type_physical_duplicates_still_group(self):
+        """两本实体书（都没有格式文件）仍要能查出来——"各自内部判断"不是"跳过实体书"。"""
+        books = {
+            1: {'id': 1, 'title': '活着', 'authors': ['余华'], 'available_formats': [],
+                'isbn': '', '#book_type': 1,
+                'timestamp': '2026-01-01T00:00:00+00:00', '_paths': {}},
+            2: {'id': 2, 'title': '活着（精装）', 'authors': ['余华'], 'available_formats': [],
+                'isbn': '', '#book_type': 1,
+                'timestamp': '2026-02-01T00:00:00+00:00', '_paths': {}},
+        }
+        api = FakeApi(books)
+        built = self.driver.run_scan(api, api.calibre.all_book_ids(), threshold=0.85)
+        self.assertEqual(built['summary']['group_count'], 1)
+        self.assertEqual(built['summary']['cross_type_excluded'], 0)
+
+
 class TestWritePathGuard(unittest.TestCase):
     """守门：整个工具只有 merge.py 允许调用删/改书库的方法。"""
 

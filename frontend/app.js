@@ -121,6 +121,7 @@
     removedTitles: [],
     deletedTitles: [],
     failedTitles: [],
+    ignored: [],         // 已忽略的配对（不是重复）——可撤销
     active: null,        // 当前展开的分组 {index, group, keeperId, selected}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
@@ -137,6 +138,7 @@
       'summary-card', 'summary', 'filter-confidence', 'filter-keyword',
       'list-meta', 'groups', 'pager', 'pager-label', 'btn-prev', 'btn-next',
       'empty-state', 'handled-card', 'handled-list', 'toasts',
+      'ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
     ].forEach(function (id) {
       el[id] = document.getElementById(id);
     });
@@ -163,6 +165,7 @@
       renderList({ generated_at: state.generatedAt });
     }
     renderHandled();
+    renderIgnored();
   };
 
   function formatBytes(size) {
@@ -261,7 +264,10 @@
       if (event.key === 'Escape' && state.active) collapseRow();
     });
 
+    el['btn-unignore-all'].addEventListener('click', function () { unignore(null, true); });
+
     loadScope();
+    loadIgnored();
     restore();
   }
 
@@ -438,6 +444,15 @@
     // "因卷册序号排除"只在真的排除了才显示——它解释"为什么这套书没被报出来"
     if (summary.serial_excluded) {
       items.push(['summary.serialExcluded', '已排除卷册序号', summary.serial_excluded]);
+    }
+    // 同理：实体书与电子书不互相比较，排除了多少对要说出来（不是静默收紧）
+    if (summary.cross_type_excluded) {
+      items.push(['summary.crossTypeExcluded', '已排除实体/电子书交叉',
+                  summary.cross_type_excluded]);
+    }
+    // 以及被忽略名单挡掉的候选对（用户自己点的，更要说清楚）
+    if (summary.ignored_excluded) {
+      items.push(['summary.ignoredExcluded', '已忽略的配对', summary.ignored_excluded]);
     }
     el.summary.innerHTML = items.map(function (item) {
       return '<div class="bd-stat"><span class="bd-stat-value">' + escapeHtml(item[2]) +
@@ -732,6 +747,8 @@
     if (collapse) collapse.addEventListener('click', collapseRow);
     var apply = drawer.querySelector('[data-apply]');
     if (apply) apply.addEventListener('click', applyMerge);
+    var ignore = drawer.querySelector('[data-ignore]');
+    if (ignore) ignore.addEventListener('click', ignoreGroup);
     var cancel = drawer.querySelector('[data-plan-cancel]');
     if (cancel) cancel.addEventListener('click', function () {
       state.plan = null;
@@ -867,9 +884,19 @@
         '<button class="bd-btn bd-btn-primary" data-preview="1"' +
           (chosen ? '' : ' disabled') + '>' +
           escapeHtml(t('bench.preview', '先看合并预览')) + '</button>' +
+        // 忽略是**可撤销**的（「已忽略」卡片里能撤），所以不加二次确认
+        '<button class="bd-btn" data-ignore="1">' +
+          escapeHtml(t('bench.ignore', '不是重复（忽略这组）')) + '</button>' +
         '<button class="bd-btn" data-collapse="1">' +
           escapeHtml(t('bench.collapse', '收起')) + '</button>' +
       '</div>' +
+      '<p class="bd-hint">' + escapeHtml(t('bench.ignoreHint',
+        '忽略只是"以后别再报出来"，不动书库、也不删记录；随时可以在「已忽略」里撤销。')) + '</p>' +
+      (group.ignored_pairs
+        ? '<p class="bd-hint bd-warn-hint">' +
+          escapeHtml(t('bench.ignoredPart', '本组有 {n} 对已被忽略：重新查重后会拆开。')
+            .replace('{n}', group.ignored_pairs)) + '</p>'
+        : '') +
       '<p class="bd-hint bd-warn-hint">' + escapeHtml(t('bench.hint',
         '删除源记录会连带失去它的收藏/在读/阅读进度/评分/书单，请先确认要保留哪一本。')) + '</p>';
     return head + pickRow + '<div class="bd-copies">' + cards + '</div>' + table + actions;
@@ -1212,6 +1239,92 @@
       if (!resp || resp.err !== 'ok') return;      // 静默：列表本身已经刷新过了
       state.groupCache[index] = resp.data.group;
       setActive(index, resp.data.group);
+    });
+  }
+
+  // ---------------------------------------------------------------- 忽略（不是重复）
+
+  /** 记下"这几本不是重复"：不动书库，只让这一组以后不再报出来（可撤销）。 */
+  function ignoreGroup() {
+    if (!state.active) return;
+    var index = state.active.index;
+    var button = el.groups.querySelector('[data-ignore]');
+    if (button) button.disabled = true;
+    api('ignore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // 不带 ids = 整组（服务端照样会回本次扫描的成员里核对一遍）
+      body: JSON.stringify({ index: index }),
+    }).then(function (resp) {
+      if (!resp || resp.err !== 'ok') {
+        if (button) button.disabled = false;
+        notify((resp && resp.msg) || t('ignore.failed', '忽略失败'), 'error');
+        return;
+      }
+      var titles = (resp.data || {}).titles || [];
+      notify(t('ignore.done', '已忽略《{titles}》：以后查重不再报出来（可在「已忽略」里撤销）')
+        .replace('{titles}', titles.join('》《')), 'success');
+      state.active = null;                 // 这一组马上会从列表里消失
+      state.plan = null;
+      delete state.groupCache[index];
+      loadGroups();
+      loadIgnored();
+    }).catch(function () {
+      if (button) button.disabled = false;
+      notify(t('ignore.failed', '忽略失败'), 'error');
+    });
+  }
+
+  function loadIgnored() {
+    api('ignored').then(function (resp) {
+      if (!resp || resp.err !== 'ok') return;      // 读不到就不显示这张卡，不打扰
+      state.ignored = (resp.data || {}).ignored || [];
+      renderIgnored();
+    }).catch(function () { /* 忽略名单读不到不该影响主流程 */ });
+  }
+
+  function renderIgnored() {
+    var rows = state.ignored || [];
+    el['ignored-card'].hidden = rows.length === 0;
+    if (!rows.length) return;
+    el['ignored-count'].textContent = t('ignore.count', '{n} 对').replace('{n}', rows.length);
+    el['ignored-list'].innerHTML = rows.map(function (row) {
+      return '<li>' +
+        escapeHtml(t('ignore.item', '《{a}》 ↔ 《{b}》')
+          .replace('{a}', row.a_title).replace('{b}', row.b_title)) +
+        '<span class="bd-hint"> · ' + escapeHtml(row.at || '') + '</span>' +
+        '<button class="bd-btn bd-btn-small" data-unignore="' + row.a + ',' + row.b + '">' +
+          escapeHtml(t('ignore.undo', '撤销')) + '</button>' +
+      '</li>';
+    }).join('');
+    el['ignored-list'].querySelectorAll('[data-unignore]').forEach(function (node) {
+      node.addEventListener('click', function () {
+        var parts = node.getAttribute('data-unignore').split(',');
+        unignore([[Number(parts[0]), Number(parts[1])]]);
+      });
+    });
+  }
+
+  function unignore(pairs, all) {
+    var button = el['btn-unignore-all'];
+    if (button) button.disabled = true;
+    api('unignore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(all ? { all: true } : { pairs: pairs }),
+    }).then(function (resp) {
+      if (button) button.disabled = false;
+      if (!resp || resp.err !== 'ok') {
+        notify((resp && resp.msg) || t('ignore.undoFailed', '撤销失败'), 'error');
+        return;
+      }
+      notify(t('ignore.undone', '已撤销 {n} 对忽略')
+        .replace('{n}', (resp.data || {}).removed || 0), 'success');
+      loadIgnored();
+      loadGroups();          // 撤销之后被藏起来的组要回来
+    }).catch(function () {
+      if (button) button.disabled = false;
+      notify(t('ignore.undoFailed', '撤销失败'), 'error');
     });
   }
 

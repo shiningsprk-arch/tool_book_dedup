@@ -146,7 +146,7 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
  */
 (function (window) {
   'use strict';
-  var DATA = { report: null, index: null, merged: [], deleted: [] };
+  var DATA = { report: null, index: null, merged: [], deleted: [], ignored: [] };
   var failing = [];
 
   // 数据没就绪时的调用**挂起等待**，而不是立刻回错。
@@ -166,6 +166,31 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
   function goneIds() {
     return DATA.merged.map(function (m) { return m.id; })
       .concat(DATA.deleted.map(function (d) { return d.id; }));
+  }
+
+  /** 忽略名单的配对键（与 dedup/ignore.pair_key 同规范：小的在前）。 */
+  function ignoredKeys() {
+    return DATA.ignored.map(function (entry) { return entry[0] + ',' + entry[1]; });
+  }
+
+  function pairKey(a, b) { return a <= b ? a + ',' + b : b + ',' + a; }
+
+  function pairsIn(ids) {
+    var unique = ids.slice().sort(function (a, b) { return a - b; });
+    var out = [];
+    for (var i = 0; i < unique.length; i += 1) {
+      for (var j = i + 1; j < unique.length; j += 1) {
+        out.push([unique[i], unique[j]]);
+      }
+    }
+    return out;
+  }
+
+  function ignoredCount(ids) {
+    var keys = ignoredKeys();
+    return pairsIn(ids).filter(function (pair) {
+      return keys.indexOf(pair[0] + ',' + pair[1]) >= 0;
+    }).length;
   }
 
   function remainingMembers(group) {
@@ -258,12 +283,16 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       // 与 tool.GroupsHandler 一致：按**剩余成员**够不够两本摘组，并扣掉已消失的成员
       // 重算行标题（预览里也得这样，否则"只合并了一部分"之后这一行的书名是假的）
       var groups = DATA.index.groups.filter(function (g) {
-        return remainingMembers(g).length >= 2;
+        var live = remainingMembers(g);
+        if (live.length < 2) return false;
+        // 整组的两两配对都被忽略 → 这一组不再报出来（与后端 _visible_groups 同规则）
+        return ignoredCount(live) < pairsIn(live).length;
       }).map(function (g) {
         var row = {};
         Object.keys(g).forEach(function (key) { row[key] = g[key]; });
         var gone = (g.members || []).filter(function (id) { return mergedIds.indexOf(id) >= 0; });
         row.stale_count = gone.length;
+        row.ignored_pairs = ignoredCount(remainingMembers(g));
         if (gone.length) applyLiveRow(row, g, gone);
         return row;
       });
@@ -313,6 +342,9 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         };
         group = copy;
       }
+      group = Object.assign({}, group, {
+        ignored_pairs: ignoredCount(live.map(function (m) { return m.id; })),
+      });
       return Promise.resolve({ err: 'ok', data: { task_id: 7, group: group, gone_ids: mergedIds } });
     }
     if (name === 'merge_plan') {
@@ -381,6 +413,54 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         at: new Date().toISOString().slice(0, 19).replace('T', ' '),
       });
       return Promise.resolve({ err: 'ok', data: { deleted_id: want, title: found.title } });
+    }
+    if (name === 'ignored') {
+      return Promise.resolve({ err: 'ok', data: {
+        ignored: DATA.ignored.map(function (pair) {
+          var titles = {};
+          (DATA.report.groups || []).forEach(function (group) {
+            (group.members || []).forEach(function (m) { titles[m.id] = m.title; });
+          });
+          return {
+            a: pair[0], b: pair[1],
+            a_title: titles[pair[0]] || ('#' + pair[0]),
+            b_title: titles[pair[1]] || ('#' + pair[1]),
+            at: pair[2] || '',
+          };
+        }),
+      } });
+    }
+    if (name === 'ignore') {
+      // 与 tool.IgnoreHandler 同守门：id 必须是**这一组的成员**
+      var pos = parseInt(params.index, 10);
+      var target = DATA.report.groups[pos];
+      if (!target) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
+      var ids = (target.members || []).map(function (m) { return m.id; });
+      if (ids.length < 2) return Promise.resolve({ err: 'params.invalid', msg: '至少要选两本' });
+      var stamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      var added = 0;
+      pairsIn(ids).forEach(function (pair) {
+        if (ignoredKeys().indexOf(pair[0] + ',' + pair[1]) >= 0) return;
+        DATA.ignored.push([pair[0], pair[1], stamp]);
+        added += 1;
+      });
+      return Promise.resolve({ err: 'ok', data: {
+        added: added,
+        titles: (target.members || []).map(function (m) { return m.title; }),
+      } });
+    }
+    if (name === 'unignore') {
+      if (params.all) {
+        var removedAll = DATA.ignored.length;
+        DATA.ignored = [];
+        return Promise.resolve({ err: 'ok', data: { removed: removedAll } });
+      }
+      var wanted = (params.pairs || []).map(function (pair) { return pairKey(pair[0], pair[1]); });
+      var before = DATA.ignored.length;
+      DATA.ignored = DATA.ignored.filter(function (pair) {
+        return wanted.indexOf(pairKey(pair[0], pair[1])) < 0;
+      });
+      return Promise.resolve({ err: 'ok', data: { removed: before - DATA.ignored.length } });
     }
     if (name === 'merge') {
       // 回的形状必须与 tool.MergeHandler 一致（含 moved_total / removed_ids / kept）——

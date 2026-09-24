@@ -281,6 +281,40 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn('byId[member.id]', body)
         self.assertNotIn('(row.cells || []).map(', body)
 
+    def test_ignore_wiring(self):
+        """忽略（不是重复）：按钮 → 接口 → 已忽略卡片与撤销，一条线都不能断。"""
+        self.assertIn('data-ignore="1"', self.js)
+        self.assertIn("api('ignore'", self.js)
+        self.assertIn("api('ignored'", self.js)
+        self.assertIn("api('unignore'", self.js)
+        # 撤销按钮带着配对键回来（后端按配对删）
+        self.assertIn('data-unignore="', self.js)
+        self.assertIn('loadIgnored()', self.js)
+        self.assertIn('renderIgnored()', self.js)
+        # 卡片节点必须在 HTML 里（id 拼错会静默不显示）
+        for node_id in ('ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all'):
+            self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
+            self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
+
+    def test_ignore_is_reversible_so_no_confirm_dialog(self):
+        """忽略可撤销 → 不该再套一层二次确认（防误点的代价已经很低）。"""
+        match = re.search(r'function ignoreGroup\(\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIsNotNone(match, '找不到 ignoreGroup 的定义')
+        body = match.group(1)
+        self.assertNotIn('confirm', body.lower())
+        self.assertIn("api('ignore'", body)
+
+    def test_summary_shows_the_two_new_exclusions(self):
+        """被排除了多少要如实显示：跨类交叉、被忽略的配对（不是静默收紧）。"""
+        self.assertIn('summary.cross_type_excluded', self.js)
+        self.assertIn('summary.ignored_excluded', self.js)
+
+    def test_language_switch_redraws_ignored_card(self):
+        """语言切换要重画动态内容——忽略卡片是拼出来的字符串，漏了它就整段中文。"""
+        match = re.search(r'\n  rerender = function \(\) \{(.*?)\n  \};', self.js, re.S)
+        self.assertIsNotNone(match, '找不到 rerender 的定义')
+        self.assertIn('renderIgnored()', match.group(1))
+
     def test_no_absolute_api_paths(self):
         """工具接口必须走桥（相对路径）；唯一例外是本地预览的兜底分支。
 

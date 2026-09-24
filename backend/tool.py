@@ -12,6 +12,9 @@ Handler，宿主 toolbox_manager 把它们挂到：
     GET  /api/toolbox/tool/book_dedup/merge_plan 合并预览（只算不写）
     POST /api/toolbox/tool/book_dedup/merge      执行合并（写操作）
     POST /api/toolbox/tool/book_dedup/delete     删除一本重复书（写操作）
+    POST /api/toolbox/tool/book_dedup/ignore     记下"这一组不是重复"（不改书库）
+    POST /api/toolbox/tool/book_dedup/unignore   撤销忽略
+    GET  /api/toolbox/tool/book_dedup/ignored    忽略名单
     GET  /api/toolbox/tool/book_dedup/cancel     取消扫描
 
 两个外部工具特有的注意点（与其它工具包一致）：
@@ -46,6 +49,7 @@ from webserver.toolbox.base_tool import BaseTool
 
 from . import driver, write_ops
 from .dedup import diff as diff_mod
+from .dedup import ignore as ignore_mod
 from .dedup import keeper as keeper_mod
 from .dedup import report as report_mod
 
@@ -77,7 +81,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.5',
+            'revision': '0.1.6',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -209,6 +213,8 @@ class BookDedupTool(BaseTool):
                 logging.warning('[book_dedup] progress update failed: %s', err)
 
         try:
+            # 忽略名单：读一次，扫描时按配对剔除；失效条目（书删了 / id 换了主人）
+            # 由 write_ops 核对后回写，报告里记数交代（不静默丢弃用户设过的白名单）
             built = driver.run_scan(
                 tool.api,
                 book_ids=cls._scan_ids,
@@ -216,6 +222,9 @@ class BookDedupTool(BaseTool):
                 scope_note=cls._scan_scope_note,
                 on_progress=on_progress,
                 cancel=cls._cancel_event,
+                ignored_entries=write_ops.read_ignored(cls.shared_dir()),
+                prune_ignored=lambda records_by_id: write_ops.live_ignored(
+                    cls.shared_dir(), records_by_id),
             )
             if built is None:
                 tool.complete_task(task_id)  # 被取消：正常收尾，不算失败
@@ -400,7 +409,8 @@ class GroupsHandler(BaseHandler):
         groups = list(index.get('groups') or [])
         # 已经不在书库的成员（合并掉的 + 单独删掉的）：留在列表里会引导用户再点一次，
         # 拿它们去合并还会撞上"来源书籍不存在"。一组不足两本也就不必再处理。
-        groups = _visible_groups(groups, write_ops.gone_ids(work_dir))
+        groups = _visible_groups(groups, write_ops.gone_ids(work_dir),
+                                 load_ignored_keys(tool))
 
         confidence = self.get_argument('confidence', None)
         if confidence:
@@ -440,20 +450,31 @@ class GroupsHandler(BaseHandler):
         }
 
 
-def _visible_groups(groups, gone):
-    """列表要显示的行：摘掉"剩下的不够两本"的组，并按存活成员重算行标题。
+def _visible_groups(groups, gone, ignored_keys=None):
+    """列表要显示的行：摘掉"剩下的不够两本"的组与"整组已被忽略"的组，
+    并按存活成员重算行标题。
 
     :param groups: 索引里的组（`driver.read_index()` 的 `groups`）
     :param gone:   已经不在书库的成员 id（`write_ops.gone_ids()`）
+    :param ignored_keys: 忽略名单的配对键集合。**整组都被忽略**的行直接不显示——
+        那正是"重新查重之后这一组不会再出现"的同一条件（分组是成对关系的连通分量，
+        组内两两都被剔掉，这一组就散了）；只忽略了其中几对的行照旧显示，
+        但带上 `ignored_pairs` 让界面如实提示"本组有 N 对已被忽略"。
     """
+    ignored_keys = ignored_keys or set()
     rows = []
     for group in groups:
         member_ids = list(group.get('members') or [])
-        if len(set(member_ids) - gone) < 2:
+        live_ids = [book_id for book_id in member_ids if book_id not in gone]
+        if len(live_ids) < 2:
             continue
+        counts = ignore_mod.counts_for_group(live_ids, ignored_keys)
+        if counts['pairs'] and counts['ignored'] >= counts['pairs']:
+            continue                      # 整组都被忽略：这一组不再报出来
         row = dict(group)
         stale = len(set(member_ids) & gone)
         row['stale_count'] = stale
+        row['ignored_pairs'] = counts['ignored']
         if stale:
             # 行标题是扫描时写进索引的：只合并了一部分成员之后，它还会显示已经被
             # 删掉的书名。0.1.5 起"一组做一半"是常态，必须扣掉重算。
@@ -544,10 +565,13 @@ class GroupHandler(BaseHandler):
         gone = write_ops.gone_ids(work_dir)
         members = [m for m in (group.get('members') or [])
                    if m.get('id') not in gone]
+        # 这一组有几对已被忽略（0.1.6）：抽屉里要如实提示"重新查重后会拆开"
+        group = dict(group)
+        group['ignored_pairs'] = ignore_mod.counts_for_group(
+            [m.get('id') for m in members], load_ignored_keys(tool))['ignored']
         keep_rule = self.get_argument('keep_rule', None)
         if keep_rule or len(members) != len(group.get('members') or []):
             # 成员变过（有成员被合并或删掉）或用户换了保留规则 → 重算推荐，不能沿用旧结论
-            group = dict(group)
             group['members'] = members
             group['member_count'] = len(members)
             group['recommendation'] = write_ops.recommend_for_members(members, keep_rule)
@@ -673,6 +697,116 @@ class DeleteHandler(BaseHandler):
         return {'err': 'ok', 'data': result['data']}
 
 
+def load_ignored_keys(tool):
+    """忽略名单的配对键集合（读一次，供 `/groups`、`/group` 用）。
+
+    文件很小（一条配对一行），每个请求读一次即可；读取失败由 `write_ops` 记日志并
+    按空名单处理——忽略名单读不到不该让整个列表打不开。
+    """
+    return ignore_mod.ignored_keys_from(
+        write_ops.read_ignored(tool.shared_dir()))
+
+
+class IgnoreHandler(BaseHandler):
+    """POST /ignore —— 记下"这一组不是重复"，下次查重不再报出来。
+
+    请求体：``{"index": 3, "task_id": 7, "ids": [12, 15]}``（`ids` 可省，默认整组）。
+
+    守门与写操作同款：只收分组序号 + 成员 id，且**每个 id 都必须是这一组当前的成员**。
+    这里不改书库，但一样不接受任意 id——否则一个构造出来的请求就能把任意两本书写进白名单，
+    以后它们永远不再被查出来（白名单是"少报"，同样是用户看不见的损失）。
+
+    记的是**配对**不是整本（见 `dedup/ignore.py` 的理由）：记整本会连真重复一起藏掉，
+    而且书 id 会被 calibre 复用（新书拿 `max(id)+1`），只存 id 的白名单会误伤新书。
+    """
+
+    @js
+    @is_admin
+    async def post(self):
+        payload = _parse_body(self)
+        if payload is None:
+            return {'err': 'params.invalid', 'msg': _('请求体不是合法 JSON')}
+        index_arg = payload.get('index')
+        if index_arg is None:
+            return {'err': 'params.invalid', 'msg': _('缺少 index 参数')}
+
+        tool = BookDedupTool()
+        work_dir, _resolved = _report_dir_for(tool, payload.get('task_id'))
+        if not work_dir:
+            return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
+
+        members, error = write_ops.group_members(work_dir, index_arg)
+        if error:
+            return error
+        wanted = payload.get('ids')
+        if wanted in (None, '', []):
+            chosen = members
+        else:
+            if not isinstance(wanted, (list, tuple)):
+                return {'err': 'params.invalid', 'msg': _('ids 必须是数组')}
+            try:
+                picked = {int(book_id) for book_id in wanted}
+            except (TypeError, ValueError):
+                return {'err': 'params.invalid', 'msg': _('ids 必须是整数数组')}
+            known = {m.get('id') for m in members}
+            foreign = sorted(picked - known)
+            if foreign:
+                return {'err': 'book.not_in_group',
+                        'msg': _('这些书不属于这一组：%s')
+                               % '、'.join(str(i) for i in foreign)}
+            chosen = [m for m in members if m.get('id') in picked]
+        if len(chosen) < 2:
+            return {'err': 'params.invalid', 'msg': _('至少要选两本才算"不是重复"')}
+
+        added = write_ops.add_ignored(tool.shared_dir(), chosen)
+        titles = [m.get('title') or '' for m in chosen]
+        logging.info('[book_dedup] ignored group %s: %s', index_arg, titles)
+        return {'err': 'ok', 'data': {
+            'added': added,
+            'titles': titles,
+            'pairs': [list(pair) for pair in ignore_mod.pairs_in(
+                [m.get('id') for m in chosen])],
+        }}
+
+
+class UnignoreHandler(BaseHandler):
+    """POST /unignore —— 撤销忽略。
+
+    请求体：``{"pairs": [[12, 15]]}`` 撤销指定配对；``{"all": true}`` 清空名单。
+    """
+
+    @js
+    @is_admin
+    async def post(self):
+        payload = _parse_body(self)
+        if payload is None:
+            return {'err': 'params.invalid', 'msg': _('请求体不是合法 JSON')}
+        tool = BookDedupTool()
+        if payload.get('all'):
+            removed = write_ops.remove_ignored(tool.shared_dir(), all_entries=True)
+            return {'err': 'ok', 'data': {'removed': removed}}
+        pairs = payload.get('pairs')
+        if not isinstance(pairs, (list, tuple)) or not pairs:
+            return {'err': 'params.invalid', 'msg': _('缺少 pairs 参数')}
+        try:
+            parsed = [(int(pair[0]), int(pair[1])) for pair in pairs]
+        except (TypeError, ValueError, IndexError):
+            return {'err': 'params.invalid', 'msg': _('pairs 必须是 [[a, b], ...]')}
+        removed = write_ops.remove_ignored(tool.shared_dir(), parsed)
+        return {'err': 'ok', 'data': {'removed': removed}}
+
+
+class IgnoredHandler(BaseHandler):
+    """GET /ignored —— 忽略名单（书名 + 配对），供界面列出与撤销。"""
+
+    @js
+    @is_admin
+    async def get(self):
+        tool = BookDedupTool()
+        return {'err': 'ok', 'data': {
+            'ignored': write_ops.ignored_rows(tool.shared_dir())}}
+
+
 class CancelHandler(BaseHandler):
     """POST /cancel —— 取消扫描。"""
 
@@ -694,6 +828,9 @@ ROUTES = (
     (r'merge_plan', MergePlanHandler),
     (r'merge', MergeHandler),
     (r'delete', DeleteHandler),
+    (r'ignore', IgnoreHandler),
+    (r'unignore', UnignoreHandler),
+    (r'ignored', IgnoredHandler),
     (r'cancel', CancelHandler),
 )
 

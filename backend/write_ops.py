@@ -36,10 +36,12 @@ import threading
 import time
 
 from . import driver
+from .dedup import ignore as ignore_mod
 from .dedup import keeper as keeper_mod
 
 MERGED_FILENAME = 'merged.json'
 DELETED_FILENAME = 'deleted.json'
+IGNORED_FILENAME = 'ignored.json'
 
 # 写操作串行化。**两个用途**：
 #
@@ -194,6 +196,124 @@ def gone_ids(work_dir):
     return set(read_merged_ids(work_dir)) | set(read_deleted_ids(work_dir))
 
 
+# --------------------------------------------------------------------------- 忽略名单
+#
+# "这几本不是重复"记在这里。**不是写书库**，所以不受 §写操作 那套守门约束；
+# 但它是跨会话的持久状态（下次扫描要读），所以照样走同一把锁、同样的"读→改→写"原子替换。
+
+
+def ignored_path(work_dir):
+    return os.path.join(work_dir, IGNORED_FILENAME)
+
+
+def read_ignored(work_dir):
+    """读忽略名单（配对列表，每条带两侧指纹）。"""
+    return _read_ledger(ignored_path(work_dir), 'ignored')
+
+
+def _write_ignored(work_dir, entries):
+    with _WRITE_LOCK:
+        try:
+            os.makedirs(work_dir, exist_ok=True)
+            tmp = ignored_path(work_dir) + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as handle:
+                json.dump(entries, handle, ensure_ascii=False)
+            os.replace(tmp, ignored_path(work_dir))
+            return True
+        except OSError as err:
+            logging.error('[book_dedup] ignored list not written: %s', err)
+            return False
+
+
+def add_ignored(work_dir, members, now=None):
+    """把这一组成员**两两**记为"不是重复"。
+
+    :param members: 报告形状的成员（至少要两本）
+    :return: 新增的配对条数
+    """
+    with _WRITE_LOCK:
+        entries = read_ignored(work_dir)
+        existing = ignore_mod.ignored_keys_from(entries)
+        stamp = now or time.strftime('%Y-%m-%d %H:%M:%S')
+        by_id = {m.get('id'): m for m in members if m.get('id') is not None}
+        added = 0
+        for left, right in ignore_mod.pairs_in(list(by_id)):
+            if (left, right) in existing:
+                continue
+            # 指纹两侧都存：扫描时用它察觉"同一个 id 换了另一本书"（见 dedup/ignore.py）
+            entries.append({
+                'a': left,
+                'b': right,
+                'at': stamp,
+                'titles': {str(left): (by_id[left].get('title') or ''),
+                           str(right): (by_id[right].get('title') or '')},
+                'sigs': {str(left): ignore_mod.signature(by_id[left]),
+                         str(right): ignore_mod.signature(by_id[right])},
+            })
+            added += 1
+        if added:
+            _write_ignored(work_dir, entries)
+        return added
+
+
+def remove_ignored(work_dir, pairs=None, all_entries=False):
+    """撤销忽略：给了 `pairs` 就只删这几对；`all_entries=True` 清空。
+
+    :return: 删掉的条数
+    """
+    with _WRITE_LOCK:
+        entries = read_ignored(work_dir)
+        if all_entries:
+            removed = len(entries)
+            if removed:
+                _write_ignored(work_dir, [])
+            return removed
+        wanted = {ignore_mod.pair_key(a, b) for a, b in (pairs or [])}
+        if not wanted:
+            return 0
+        kept = [e for e in entries
+                if ignore_mod.pair_key(e.get('a', 0), e.get('b', 0)) not in wanted]
+        removed = len(entries) - len(kept)
+        if removed:
+            _write_ignored(work_dir, kept)
+        return removed
+
+
+def live_ignored(work_dir, records_by_id):
+    """按当前书库核对忽略名单，**剔掉失效的**并回写（书删了 / id 换了主人）。
+
+    :return: 仍然生效的条目列表
+    """
+    entries = read_ignored(work_dir)
+    if not entries:
+        return []
+    live = [e for e in entries if ignore_mod.entry_is_live(e, records_by_id)]
+    if len(live) != len(entries):
+        _write_ignored(work_dir, live)
+        logging.info('[book_dedup] ignored list pruned: %d -> %d',
+                     len(entries), len(live))
+    return live
+
+
+def ignored_rows(work_dir):
+    """忽略名单给界面看的形状（书名 + 配对的规范键）。"""
+    rows = []
+    for entry in read_ignored(work_dir):
+        left, right = entry.get('a'), entry.get('b')
+        if left is None or right is None:
+            continue
+        titles = entry.get('titles') or {}
+        rows.append({
+            'a': left,
+            'b': right,
+            'a_title': titles.get(str(left)) or '',
+            'b_title': titles.get(str(right)) or '',
+            'at': entry.get('at') or '',
+        })
+    rows.sort(key=lambda row: (row['at'], row['a'], row['b']), reverse=True)
+    return rows
+
+
 def execute_delete(api, work_dir, index_arg, book_id):
     """单独删除一本重复书（写操作，串行化）。
 
@@ -208,8 +328,8 @@ def execute_delete(api, work_dir, index_arg, book_id):
 
 def _execute_delete(api, work_dir, index_arg, book_id):
     """`execute_delete` 的实现体（调用方持锁）。"""
-    # 单删用 `_group_members`（不要求至少两本）：把一组删到只剩一本或删光都合法
-    members, error = _group_members(work_dir, index_arg)
+    # 单删用 `group_members`（不要求至少两本）：把一组删到只剩一本或删光都合法
+    members, error = group_members(work_dir, index_arg)
     if error:
         return error
 
@@ -279,10 +399,11 @@ def recommend_for_members(members, rule=None):
     return keeper_mod.recommend(adapted, rule=rule or 'metadata')
 
 
-def _group_members(work_dir, index_arg):
+def group_members(work_dir, index_arg):
     """取这一组的当前成员（报告形状），**已消失的（合并掉/单独删掉）不算**。
 
     不做数量判断——单删一组里的最后一本也是合法操作，只有合并才要求至少剩两本。
+    公开给 `/ignore` 用（它也要按同一套守门核对 id 属于这一组）。
     """
     try:
         position = int(index_arg)
@@ -302,7 +423,7 @@ def _group_members(work_dir, index_arg):
 
 def _current_members(work_dir, index_arg, gone=None):
     """取这一组的当前成员，并要求**至少两本**（合并的前提）。"""
-    members, error = _group_members(work_dir, index_arg)
+    members, error = group_members(work_dir, index_arg)
     if error:
         return None, error
     if len(members) < 2:

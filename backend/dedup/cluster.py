@@ -21,6 +21,12 @@
 `德川家康（第十二部）` 的主书名完全相同，不论阈值多高都会被算成 1.0，靠阈值是拦不住的，
 必须在配对前就把"只差一个卷号"的对剔掉。剔掉多少对会记进 `stats['skipped_serial']`，
 在报告里如实交代（不静默吞掉）。
+
+**类型闸**（`_same_book_type`）是第三道：**实体书与电子书不互相比较**（用户口径）。
+实体书在书架上、电子书在磁盘上，凑成一组再"合并"只会把实体记录删掉、什么也搬不过去。
+它在"本来会成对"之后才判（ISBN 命中 / 书名过了阈值），因为要回答的是
+"有多少对本来会被判成重复、却因为一边实体一边电子而没有报出来"，这个数记进
+`stats['skipped_cross_type']`。`book_type` 键名本身有个坑，见 `driver._book_type`。
 """
 from .normalize import (families_of, isbn_key, title_core, title_key, author_keys,
                         differs_only_by_serial)
@@ -72,6 +78,20 @@ def _strongest(reasons):
     return max(REASON_RANK.get(r, 0) for r in reasons)
 
 
+def _same_book_type(left, right):
+    """两本是不是同类（电子书 / 实体书）。
+
+    **用户口径：不跨类判断**——实体书在书架上、电子书在磁盘上，是两种东西；
+    把它们凑成一组、再"合并"，结果是实体记录被删掉、什么文件也搬不过去。
+    所以只在同类内部配对。
+
+    `book_type` 在宿主侧是 0 电子书 / 1 实体书（自定义列缺失时全是 0，
+    即绝大多数个人书库都落进"电子书"这一类，闸门对它们等于不存在）。
+    这里按**布尔**比较而不是相等：宿主给的是 0/1，但旧值/字符串脏数据不该让同一类被判成两类。
+    """
+    return bool(left.get('book_type')) == bool(right.get('book_type'))
+
+
 def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
     """从全量记录里找出候选重复对。
 
@@ -86,9 +106,11 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
         'skipped_buckets': 0,
         'skipped_books': 0,
         'skipped_serial': 0,
+        'skipped_cross_type': 0,
         'max_bucket': max_bucket,
     }
     cache = SimilarityCache()
+    cross_type = set()
 
     # --- 第一档：ISBN key 相同且媒体家族重叠 → 直接成对（强证据，与标题无关）
     by_isbn = {}
@@ -104,6 +126,10 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
                 left, right = group[i], group[j]
                 if not (families_of(left['formats']) & families_of(right['formats'])):
                     continue  # 同一本书的 epub 与 mp3 不是重复
+                if not _same_book_type(left, right):
+                    # ISBN 相同也不跨类：一边实体一边电子 → 不成对，记账（用户口径）
+                    cross_type.add((left['id'], right['id']))
+                    continue
                 pair = _make_pair(left, right, ['isbn'], 1.0)
                 _merge_pair(pairs, pair)
 
@@ -143,6 +169,10 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
                                    left.get('_title_core'), right.get('_title_core'))
                 if score < threshold:
                     continue
+                if not _same_book_type(left, right):
+                    # 书名像到过阈值，却一边实体书一边电子书 → 不成对，记账（用户口径）
+                    cross_type.add((left['id'], right['id']))
+                    continue
                 if left.get('_isbn_key') and right.get('_isbn_key') \
                         and left['_isbn_key'] != right['_isbn_key']:
                     # 两本书号都有效但不同 → 是不同版本，降级而不是直接丢：
@@ -152,6 +182,10 @@ def candidate_pairs(records, threshold=0.85, max_bucket=DEFAULT_MAX_BUCKET):
                     reasons = ['fuzzy_metadata', 'weak_title_only']
                 _merge_pair(pairs, _make_pair(left, right, reasons, score))
 
+    # 跨类被拦下的对：**用集合去重**——同一对可能在 ISBN 档与标题档各被看一遍，
+    # 两处各加一次会把一对算成两对，用户看到的"已排除交叉 N 对"就不对了。
+    # 集合只会收到"本来会成对"的那些对（ISBN 相同 / 书名过了阈值），量级与报告同阶。
+    stats['skipped_cross_type'] = len(cross_type)
     return list(pairs.values()), stats
 
 

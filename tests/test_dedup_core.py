@@ -35,6 +35,7 @@ metadata = dedup.metadata
 diff = dedup.diff
 keeper = dedup.keeper
 report = dedup.report
+ignore = dedup.ignore
 
 
 def score_titles(left, right):
@@ -633,6 +634,122 @@ class TestKeeper(unittest.TestCase):
     def test_unknown_rule_falls_back_to_metadata(self):
         records = self._pair(left_score=90, right_score=10)
         self.assertEqual(keeper.recommend(records, rule='nonsense')['keeper_id'], 1)
+
+
+class TestBookTypeGate(unittest.TestCase):
+    """**不跨"实体书 / 电子书"判断**（0.1.6 用户口径）。
+
+    实体书在书架上、电子书在磁盘上，是两种东西；凑成一组再"合并"，结果是实体记录被删、
+    什么文件也搬不过去。所以只在同类内部配对，被排除的对数如实记账。
+    """
+
+    def test_cross_type_pair_is_not_formed(self):
+        books = [
+            make_record(1, '活着', formats=('EPUB',), book_type=0),
+            make_record(2, '活着', formats=(), book_type=1),
+        ]
+        pairs, stats = cluster.candidate_pairs(books, threshold=0.85)
+        self.assertEqual(pairs, [])
+        self.assertEqual(stats['skipped_cross_type'], 1)
+
+    def test_same_type_pairs_still_form(self):
+        # 两个实体书（都没有格式文件）仍要能互查——这正是"各自内部判断"
+        physicals = [
+            make_record(1, '活着', formats=(), book_type=1),
+            make_record(2, '活着', formats=(), book_type=1),
+        ]
+        pairs, _stats = cluster.candidate_pairs(physicals, threshold=0.85)
+        self.assertEqual([(p['a'], p['b']) for p in pairs], [(1, 2)])
+        # 两个电子书同理
+        ebooks = [
+            make_record(1, '活着', formats=('EPUB',), book_type=0),
+            make_record(2, '活着', formats=('EPUB',), book_type=0),
+        ]
+        pairs, _stats = cluster.candidate_pairs(ebooks, threshold=0.85)
+        self.assertEqual([(p['a'], p['b']) for p in pairs], [(1, 2)])
+
+    def test_isbn_path_also_respects_type(self):
+        """ISBN 相同也不跨类：一边实体、一边电子，不成对。"""
+        books = [
+            make_record(1, '三体', formats=('EPUB',), isbn='9787536692930', book_type=0),
+            make_record(2, '三体', formats=('EPUB',), isbn='9787536692930', book_type=1),
+        ]
+        pairs, stats = cluster.candidate_pairs(books, threshold=0.85)
+        self.assertEqual(pairs, [])
+        self.assertEqual(stats['skipped_cross_type'], 1)
+
+    def test_missing_column_means_all_ebook(self):
+        """自定义列不存在时（绝大多数个人书库）：全是电子书一类，闸门等于不存在。"""
+        books = [
+            make_record(1, '活着', formats=('EPUB',)),
+            make_record(2, '活着', formats=('EPUB',)),
+        ]
+        pairs, stats = cluster.candidate_pairs(books, threshold=0.85)
+        self.assertEqual([(p['a'], p['b']) for p in pairs], [(1, 2)])
+        self.assertEqual(stats['skipped_cross_type'], 0)
+
+    def test_report_surfaces_cross_type_count(self):
+        books = [
+            make_record(1, '活着', formats=('EPUB',), book_type=0),
+            make_record(2, '活着', formats=(), book_type=1),
+        ]
+        pairs, stats = cluster.candidate_pairs(books, threshold=0.85)
+        groups = cluster.group_pairs(pairs, {r['id']: r for r in books})
+        built = report.build_report(books, pairs, groups, 0.85, stats)
+        self.assertEqual(built['summary']['cross_type_excluded'], 1)
+        self.assertEqual(built['summary']['group_count'], 0)
+
+
+class TestIgnoreList(unittest.TestCase):
+    """忽略名单的纯函数层（配对键 / 指纹 / 过滤，见 `dedup/ignore.py`）。"""
+
+    def test_pair_key_is_canonical(self):
+        self.assertEqual(ignore.pair_key(9, 3), (3, 9))
+        self.assertEqual(ignore.pair_key(3, 9), (3, 9))
+        self.assertEqual(ignore.pair_key('3', '9'), (3, 9))
+
+    def test_pairs_in_expands_all_combinations(self):
+        self.assertEqual(ignore.pairs_in([5, 3, 4]),
+                         [(3, 4), (3, 5), (4, 5)])
+        self.assertEqual(ignore.pairs_in([2, 2, 1]), [(1, 2)])   # 去重
+        self.assertEqual(ignore.pairs_in([7]), [])
+
+    def test_signature_detects_a_different_book(self):
+        same_book = {'title': '活着', 'authors': ['余华'], 'size': 100_000}
+        another = {'title': '活着', 'authors': ['余华'], 'size': 900_000}
+        self.assertEqual(ignore.signature(same_book), ignore.signature(dict(same_book)))
+        self.assertNotEqual(ignore.signature(same_book), ignore.signature(another))
+        # 体积只按 64KB 取整：同一本书重新导入差几 KB 不该被当成"换了书"
+        near = {'title': '活着', 'authors': ['余华'], 'size': 100_000 + 1024}
+        self.assertEqual(ignore.signature(same_book), ignore.signature(near))
+
+    def test_entry_is_live(self):
+        record = {'id': 3, 'title': '活着', 'authors': ['余华'], 'size': 1000}
+        entry = {'a': 3, 'b': 4, 'sigs': {'3': ignore.signature(record),
+                                          '4': ignore.signature(record)}}
+        by_id = {3: record, 4: dict(record, id=4)}
+        self.assertTrue(ignore.entry_is_live(entry, by_id))
+        # 书没了
+        self.assertFalse(ignore.entry_is_live(entry, {3: record}))
+        # 同一个 id 换了另一本书（calibre 的新书会拿到 max(id)+1，删掉的 id 可能被复用）
+        self.assertFalse(ignore.entry_is_live(
+            entry, {3: dict(record, title='别的书'), 4: dict(record, id=4)}))
+        # 0.1.5 之前写的条目没带指纹：按"还在"处理，不误剔
+        self.assertTrue(ignore.entry_is_live({'a': 3, 'b': 4}, by_id))
+
+    def test_filter_pairs_counts_dropped(self):
+        pairs = [{'a': 1, 'b': 2}, {'a': 1, 'b': 3}, {'a': 2, 'b': 3}]
+        kept, dropped = ignore.filter_pairs(pairs, {(1, 2), (2, 3)})
+        self.assertEqual([(p['a'], p['b']) for p in kept], [(1, 3)])
+        self.assertEqual(dropped, 2)
+        self.assertEqual(ignore.filter_pairs(pairs, set())[1], 0)
+
+    def test_counts_for_group(self):
+        self.assertEqual(ignore.counts_for_group([1, 2], {(1, 2)}),
+                         {'pairs': 1, 'ignored': 1})
+        self.assertEqual(ignore.counts_for_group([1, 2, 3], {(1, 2)}),
+                         {'pairs': 3, 'ignored': 1})
+        self.assertEqual(ignore.counts_for_group([1], set()), {'pairs': 0, 'ignored': 0})
 
 
 class TestReport(unittest.TestCase):

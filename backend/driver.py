@@ -17,7 +17,7 @@ import os
 import threading
 import time
 
-from .dedup import cluster, keeper, metadata, report
+from .dedup import cluster, ignore as ignore_mod, keeper, metadata, report
 
 # `get_data_as_dict` 一次读多少本。整库一次读在 25k 本时是 MB 级内存 + 长阻塞，
 # 分批读才能让进度条动起来、也才能响应取消。
@@ -63,6 +63,29 @@ def _added_at(book):
         return value.isoformat()
     except AttributeError:
         return str(value)
+
+
+def _book_type(book):
+    """这本书是实体书还是电子书（宿主口径 0/1）。
+
+    **键名是 `#book_type`，不是 `book_type`**（0.1.0–0.1.5 一直读错了这一个字）：
+    宿主自己的取法在 `webserver/base/formatter.py:50`
+    （`self.book.get(CALIBRE_COLUMN_BOOK_TYPE, BOOK_TYPE_EBOOK)`，而
+    `CALIBRE_COLUMN_BOOK_TYPE = "#book_type"`，见 `webserver/constants.py:33`），
+    它的 `self.book` 就是 `CoreAPI.calibre.get_data_as_dict()` 的原始 dict；
+    前端拿到的 `book.book_type === 1` 也是从那一层来的（`app/src/components/BookCards.vue:16`）。
+    读裸键的结果是**恒为 None**，于是"书目类型"这一项永远是电子书、
+    实体书/电子书混在同一组里——0.1.6 的"不跨类判断"正是建立在修好这个键名之上。
+
+    两个拼写都认（宿主版本/自定义列前缀若有差异，不至于再次静默读空）。
+    """
+    value = book.get('#book_type')
+    if value is None:
+        value = book.get('book_type')
+    if isinstance(value, str):
+        value = value.strip()
+        return 1 if value in ('1', 'true', 'True', '实体书') else 0
+    return 1 if value else 0
 
 
 def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=None):
@@ -132,7 +155,8 @@ def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=
                 'collector_id': book.get('collector_id'),
                 'collector_name': book.get('collector') or '',
                 'sole': bool(book.get('sole')),
-                'book_type': book.get('book_type'),
+                # 0 电子书 / 1 实体书——**必须走 `_book_type`**（键名坑见那个函数）
+                'book_type': _book_type(book),
             }
             cluster.prepare(record)
             record['_meta_score'] = metadata.score(record)
@@ -147,10 +171,17 @@ def load_records(api, book_ids, batch_size=BATCH_SIZE, on_progress=None, cancel=
 
 
 def run_scan(api, book_ids=None, threshold=DEFAULT_THRESHOLD, scope_note='',
-             on_progress=None, cancel=None):
+             on_progress=None, cancel=None, ignored_entries=None,
+             prune_ignored=None):
     """跑一次完整查重：读数据 → 配对 → 分组 → 出报告。
 
     :param on_progress: ``callable(done, total, phase)``，phase 取 'load' / 'compare'
+    :param ignored_entries: 忽略名单（`write_ops.read_ignored()` 的结果）。**在配对生成之后、
+        分组之前**剔除被忽略的配对：分组是"成对关系的连通分量"，去掉几条边只会把组拆小或
+        拆没，于是"忽略一整组"就等于这一组不再出现（见 `dedup/ignore.py`）。
+    :param prune_ignored: 可选回调 ``fn(records_by_id) -> 仍然生效的条目``，用来把失效条目
+        （书已删除 / 同一个 id 换了另一本书）剔掉并回写。**存储归 `write_ops`**，
+        driver 只做编排，所以这一步以回调形式注入而不是在这里直接写盘。
     """
     threshold = normalize_threshold(threshold)
 
@@ -168,12 +199,25 @@ def run_scan(api, book_ids=None, threshold=DEFAULT_THRESHOLD, scope_note='',
     if on_progress is not None:
         on_progress(len(records), len(records), 'compare')
     pairs, stats = cluster.candidate_pairs(records, threshold=threshold)
-    groups = cluster.group_pairs(pairs, {r['id']: r for r in records})
+    by_id = {r['id']: r for r in records}
+
+    entries = list(ignored_entries or [])
+    if prune_ignored is not None:
+        entries = list(prune_ignored(by_id) or [])
+    elif entries:
+        entries = [entry for entry in entries
+                   if ignore_mod.entry_is_live(entry, by_id)]
+    pairs, ignored_dropped = ignore_mod.filter_pairs(
+        pairs, ignore_mod.ignored_keys_from(entries))
+    groups = cluster.group_pairs(pairs, by_id)
 
     stats = dict(stats)
     stats.update(notes)
     stats['threshold'] = threshold
     stats['skipped_books_total'] = len(book_ids) - len(records)
+    # 忽略名单的战果如实记账（不静默吞掉）：生效了多少对、有多少条已经失效
+    stats['ignored_excluded'] = ignored_dropped
+    stats['ignored_stale'] = max(0, len(ignored_entries or []) - len(entries))
 
     built = report.build_report(records, pairs, groups, threshold, stats,
                                 scope_note=scope_note)
