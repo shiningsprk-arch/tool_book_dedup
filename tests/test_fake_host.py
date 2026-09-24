@@ -692,6 +692,51 @@ class TestMerge(unittest.TestCase):
         self.assertNotIn(('delete_book', source), self.api.calibre.calls)
         self.assertIn(source, self.api.calibre.books)      # 源记录还在
 
+    def test_library_read_failure_is_not_reported_as_missing_book(self):
+        """**回归（re-review）**：宿主读不到 ≠ 书不存在。
+
+        `book_exists` 以前把异常吞成 False，于是数据库/宿主的临时问题会被说成
+        "保留项已不在书库"——用户会得到完全错误的结论。
+        """
+
+        def boom(ids):
+            raise RuntimeError('数据库连接断了')
+
+        self.api.calibre.get_data_as_dict = boom
+        position, _group = self._group_index_of('三体')
+        _plan, error = self.write_ops.build_plan(
+            self.api, self.work_dir, position, keeper_id=1)
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'scope.failed')
+        self.assertIn('读取书库失败', error['msg'])
+
+    def test_unexpected_error_in_one_step_is_recorded_not_raised(self):
+        """**回归（re-review）**：单步取数异常不许冒到 handler（会变 500），
+
+        要记成这一步失败：不删任何东西，且能在「本次已处理」里看到。
+        """
+        position, group = self._group_index_of('三体')
+        source = [m['id'] for m in group['members'] if m['id'] != 1][0]
+        plan, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, position, keeper_id=1)
+        original = self.api.calibre.get_data_as_dict
+        calls = {'n': 0}
+
+        def flaky(ids):
+            # 只让"读源书"这一步失败，保留项的核对仍走正常路径
+            if source in list(ids):
+                raise RuntimeError('读这本书失败')
+            return original(ids)
+
+        self.api.calibre.get_data_as_dict = flaky
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
+        self.assertEqual(result['err'], 'merge.failed')          # 全部失败 → 报错
+        self.assertEqual(result['data']['failed'], 1)
+        self.assertNotIn(('delete_book', source), self.api.calibre.calls)
+        self.assertIn(source, self.api.calibre.books)            # 源书还在
+        failed = self.write_ops.read_failed_titles(self.work_dir)
+        self.assertEqual([f['id'] for f in failed], [source])
+
     def test_copy_failure_does_not_delete_source(self):
         """复制真的抛错时不许删源记录——只有"确实没有可复制的格式"才允许删。"""
         position, group = self._group_index_of('三体')

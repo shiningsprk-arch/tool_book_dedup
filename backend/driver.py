@@ -188,7 +188,11 @@ def run_scan(api, book_ids=None, threshold=DEFAULT_THRESHOLD, scope_note='',
 
 
 def _available_formats(api, book_id):
-    """书库里这本书现有的格式（大写集合）；书不存在返回 None。"""
+    """书库里这本书现有的格式（大写集合）；书不存在返回 None。
+
+    **读取失败会抛出去**（不在这里吞掉）：调用方要么把这一步记成失败，要么中止——
+    把"读不到"当成"书不存在"会把用户引到错误的结论上（re-review 时发现的）。
+    """
     books = api.calibre.get_data_as_dict([book_id]) or []
     if not books:
         return None
@@ -196,22 +200,30 @@ def _available_formats(api, book_id):
 
 
 def _format_on_disk(api, book_id, fmt):
-    """这个格式文件是否真的躺在磁盘上（宿主 add_format 之前只判这个，不会抛错）。"""
+    """这个格式文件是否真的躺在磁盘上（宿主 add_format 之前只判这个，不会抛错）。
+
+    读取异常时返回 **True**（"就当它在磁盘上"）：这个返回值只用来决定"能不能走
+    『文件本来就不在，没什么可丢的』这条捷径"，方向必须偏向"不确定就不删"。
+    """
     try:
         path = api.calibre.format_abspath(book_id, fmt)
     except Exception as err:  # noqa: BLE001
         logging.warning('[book_dedup] format_abspath(%s, %s) failed: %s', book_id, fmt, err)
-        return False
+        return True
     return bool(path) and os.path.exists(path)
 
 
 def book_exists(api, book_id):
-    """这本书现在还在不在书库。报告可能是几天前扫的，期间它可能在别处被删/并入。"""
+    """这本书现在还在不在书库。报告可能是几天前扫的，期间它可能在别处被删/并入。
+
+    :return: True / False / **None（读取失败，无法判断）**——调用方必须区分第三种，
+        不能把"读不到"说成"书已不在书库"。
+    """
     try:
         return bool(api.calibre.get_data_as_dict([book_id]) or [])
     except Exception as err:  # noqa: BLE001
         logging.warning('[book_dedup] book_exists(%s) failed: %s', book_id, err)
-        return False
+        return None
 
 
 def merge_group(api, source_id, target_id, delete_source=True):

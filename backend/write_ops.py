@@ -217,8 +217,11 @@ def _execute_delete(api, work_dir, index_arg, book_id):
 
     title = target.get('title') or ''
     # 报告可能是几天前扫的：书在别处被删掉时，别把宿主的"来源书籍不存在"丢给用户，
-    # 直接说清楚要重扫
-    if not driver.book_exists(api, wanted):
+    # 直接说清楚要重扫。**读不到 ≠ 不存在**，两种要分开说。
+    exists = driver.book_exists(api, wanted)
+    if exists is None:
+        return {'err': 'scope.failed', 'msg': '读取书库失败，请重试'}
+    if not exists:
         return {'err': 'book.missing',
                 'msg': '这本书已不在书库（可能已在别处被删除），请重新扫描'}
     try:
@@ -323,7 +326,11 @@ def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
     # 保留项必须**现在**还在书库。报告是跨重启持久化的，可能几天前扫的；期间用户很可能
     # 正是在工具卡片上点"打开书籍页"把它删了/并了。这一步以前没有，后果是
     # `merge_formats` 抛"目标书籍不存在"被当成"无需合并"，然后把源记录删光。
-    if not driver.book_exists(api, resolved_keeper):
+    exists = driver.book_exists(api, resolved_keeper)
+    if exists is None:
+        # "读不到"≠"不存在"：别把宿主/数据库的问题说成"书没了"（re-review 时发现的）
+        return None, {'err': 'scope.failed', 'msg': '读取书库失败，请重试'}
+    if not exists:
         return None, {'err': 'keeper.missing',
                       'msg': '保留项已不在书库（可能已在别处被删除或合并），请重新扫描'}
 
@@ -370,8 +377,15 @@ def _execute(api, work_dir, plan, delete_source=True):
     removed = []
     for step in steps:
         source_id = step.get('source_id')
-        outcome = driver.merge_group(api, source_id, keeper_id,
-                                     delete_source=delete_source)
+        try:
+            outcome = driver.merge_group(api, source_id, keeper_id,
+                                         delete_source=delete_source)
+        except Exception as err:  # noqa: BLE001
+            # 取数/核对阶段的意外异常（例如宿主 db 读失败）不能冒到 handler 变成 500：
+            # 这一步记成失败、**不删任何东西**，界面与台账都如实显示。
+            logging.error('[book_dedup] merge step %s failed: %s', source_id, err, exc_info=True)
+            outcome = {'merged': [], 'deleted': False, 'notes': ['failed'],
+                       'error': 'merge.failed', 'message': str(err)}
         entry = {
             'source_id': source_id,
             'source_title': step.get('source_title') or '',

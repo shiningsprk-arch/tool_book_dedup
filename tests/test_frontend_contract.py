@@ -197,7 +197,7 @@ class TestFrontendWiring(unittest.TestCase):
         整张表都是中文。现在字段名走 `DIFF_FIELD_KEYS`，取值按 `cell.kind` 在本地区文案。
         """
         self.assertIn('diffFieldLabel(row)', self.js)
-        self.assertIn('diffCellText(row.field, cell)', self.js)
+        self.assertIn('diffCellText(cell)', self.js)
         self.assertNotIn('escapeHtml(row.label)', self.js)
         self.assertNotIn('escapeHtml(cell.value)', self.js)
         # 后端的 summary 是中文句子（只写进报告文件给人看），界面必须自己拼

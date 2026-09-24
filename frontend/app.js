@@ -827,7 +827,7 @@
         (row.cells || []).map(function (cell) {
           var best = row.best_id && row.best_id === cell.book_id ? ' bd-td-best' : '';
           return '<td class="' + best.trim() + '">' +
-            escapeHtml(diffCellText(row.field, cell)) + '</td>';
+            escapeHtml(diffCellText(cell)) + '</td>';
         }).join('') + '</tr>';
     }).join('');
 
@@ -878,7 +878,8 @@
     return diffFieldText(row.field, row.label);
   }
 
-  function diffCellText(field, cell) {
+  // 取值只看 `kind`（后端把与语言有关的字段都标了 kind），不需要再按字段名分支
+  function diffCellText(cell) {
     var value = cell.value;
     if (cell.kind === 'bytes') return formatBytes(value);
     if (cell.kind === 'score') return t('diff.score', '{n} 分').replace('{n}', value);
