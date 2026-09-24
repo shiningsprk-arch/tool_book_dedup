@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>查重合并</title>
-  <link rel="stylesheet" href="lib/theme.css?v=0.1.1">
-  <link rel="stylesheet" href="lib/book_dedup.css?v=0.1.1">
+  <link rel="stylesheet" href="lib/theme.css?v=0.1.2">
+  <link rel="stylesheet" href="lib/book_dedup.css?v=0.1.2">
 </head>
 <body>
   <noscript>本工具需要 JavaScript。</noscript>
@@ -79,49 +79,16 @@
     </p>
   </main>
 
-  <!-- 对照台 -->
-  <div class="bd-overlay" id="bench-overlay" hidden>
-    <div class="bd-sheet" role="dialog" aria-modal="true">
-      <header class="bd-sheet-head">
-        <h2 id="bench-title" data-i18n="bench.title">重复项对照</h2>
-        <button id="bench-close" class="bd-btn bd-btn-icon" aria-label="close">✕</button>
-      </header>
-      <div class="bd-sheet-body" id="bench-body"></div>
-      <footer class="bd-sheet-foot">
-        <div class="bd-foot-actions">
-          <button id="btn-merge" class="bd-btn bd-btn-primary" data-i18n="bench.merge">合并到选中项</button>
-          <button id="btn-preview" class="bd-btn" data-i18n="bench.preview">先看合并预览</button>
-        </div>
-        <p class="bd-hint" id="bench-hint"></p>
-      </footer>
-    </div>
-  </div>
-
-  <!-- 合并预览 / 确认 -->
-  <div class="bd-overlay" id="plan-overlay" hidden>
-    <div class="bd-sheet" role="dialog" aria-modal="true">
-      <header class="bd-sheet-head">
-        <h2 id="plan-title" data-i18n="plan.title">合并预览</h2>
-        <button id="plan-close" class="bd-btn bd-btn-icon" aria-label="close">✕</button>
-      </header>
-      <div class="bd-sheet-body" id="plan-body"></div>
-      <footer class="bd-sheet-foot">
-        <label class="bd-check">
-          <input type="checkbox" id="delete-source" checked>
-          <span data-i18n="plan.deleteSource">同时删除重复记录（不勾则只合并格式，保留两条记录）</span>
-        </label>
-        <div class="bd-foot-actions">
-          <button id="btn-apply" class="bd-btn bd-btn-primary" data-i18n="plan.apply">确认合并</button>
-          <button id="plan-cancel" class="bd-btn" data-i18n="plan.cancel">取消</button>
-        </div>
-        <p class="bd-hint" id="plan-hint"></p>
-      </footer>
-    </div>
-  </div>
+  <!--
+    对照台与合并预览**都没有独立节点**：它们渲染在被点那一行之内（`.bd-drawer`），
+    由 app.js 的 drawerHtml()/planHtml() 生成。原先这里有一对居中浮层
+    （#bench-overlay / #plan-overlay），真机反馈"报告总是在最中间显示、盖住列表"，
+    因此整套浮层连同 .bd-overlay 样式一并删掉。
+  -->
 
   <div class="bd-toasts" id="toasts" aria-live="polite"></div>
 
   <script src="/static/toolbox-bridge.js"></script>
-  <script src="app.js?v=0.1.1"></script>
+  <script src="app.js?v=0.1.2"></script>
 </body>
 </html>

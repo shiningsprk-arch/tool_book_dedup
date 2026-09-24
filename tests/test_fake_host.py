@@ -474,6 +474,84 @@ class TestToolWiring(unittest.TestCase):
         self.assertIsNone(error, error)
         self.assertTrue(plan['steps'])
 
+    def test_index_carries_member_preview(self):
+        """**回归**：列表行必须能直接读到成员书名，否则每行都只写"x 本可能是同一本书"。
+
+        真机反馈：135 组每行都长一样，必须逐行点开才知道是哪些书。所以索引里要带
+        前 `driver.PREVIEW_TITLES` 个成员的书名与作者。
+        """
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        index = self.driver.read_index(work_dir)
+        report = self.driver.read_report(work_dir)
+        self.assertTrue(index['groups'])
+        for entry in index['groups']:
+            members = report['groups'][entry['index']]['members']
+            self.assertEqual(entry['titles'],
+                             [m['title'] for m in members[:2]])
+            self.assertEqual(entry['authors'],
+                             [(m.get('authors') or [''])[0] for m in members[:2]])
+            # 顺序必须与 members 一致，否则界面会把"保留项"标到别的书上
+            self.assertEqual(len(entry['titles']),
+                             min(2, len(entry['members'])))
+            self.assertEqual(entry['preview_truncated'],
+                             len(entry['members']) > 2)
+
+    def test_index_preview_caps_at_two(self):
+        """超过 2 本的组：列表只给 2 个书名（其余点开抽屉看全部）。"""
+        records = []
+        for position in range(5):
+            record = {
+                'id': 100 + position,
+                'title': '同一本书%d' % position,
+                'authors': ['同一作者'],
+                'formats': ['EPUB'],
+                'size': 100,
+                'added': '2026-01-01T00:00:00',
+                'isbn': '',
+            }
+            records.append(record)
+        # 直接构造一份报告，走 write_index 的实际实现
+        from importlib import import_module
+        pkg = import_module(self.tool.__name__.rsplit('.', 1)[0])
+        cluster = import_module(pkg.__name__ + '.dedup.cluster')
+        for record in records:
+            cluster.prepare(record)
+        pairs, stats = cluster.candidate_pairs(records, threshold=0.5)
+        groups = cluster.group_pairs(pairs, {r['id']: r for r in records})
+        report_mod = import_module(pkg.__name__ + '.dedup.report')
+        for record in records:
+            record['_meta_score'] = 50
+            record['_missing'] = []
+        report = report_mod.build_report(records, pairs, groups, 0.5, stats)
+        work_dir = self.tool.BookDedupTool.report_dir(99)
+        self.driver.write_index(work_dir, report)
+        index = self.driver.read_index(work_dir)
+        self.assertEqual(len(index['groups']), 1)
+        entry = index['groups'][0]
+        self.assertEqual(entry['members'].__len__(), 5)
+        self.assertEqual(len(entry['titles']), 2)
+        self.assertTrue(entry['preview_truncated'])
+
+    def test_report_read_is_cached(self):
+        """报告是 MB 级：`/group` 每点一行都会读一次，必须有解析缓存。"""
+        import time as _time
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        self.driver.read_report(work_dir)          # 预热
+        started = _time.perf_counter()
+        for _ in range(50):
+            self.driver.read_report(work_dir, group_index=0)
+        elapsed = _time.perf_counter() - started
+        self.assertLess(elapsed, 0.25, '50 次读单组耗时 %.3fs，缓存没生效' % elapsed)
+
+    def test_group_texts_builds_once(self):
+        """关键字筛选用一次建好的文本表（原来每筛一组读一遍报告）。"""
+        _built, work_dir = scan(self.tool, self.driver, self.api)
+        texts = self.tool._group_texts(work_dir)
+        report = self.driver.read_report(work_dir)
+        self.assertEqual(len(texts), len(report['groups']))
+        first = report['groups'][0]['members'][0]
+        self.assertIn(str(first['title']).lower(), texts[0])
+
     def test_groups_filters_by_confidence(self):
         built, work_dir = scan(self.tool, self.driver, self.api)
         index = self.driver.read_index(work_dir)

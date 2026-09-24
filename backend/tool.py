@@ -72,7 +72,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.1',
+            'revision': '0.1.2',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -422,8 +422,10 @@ class GroupsHandler(BaseHandler):
             groups = [g for g in groups if g.get('confidence') in wanted]
         keyword = (self.get_argument('keyword', '') or '').strip().lower()
         if keyword:
-            needle = keyword
-            groups = [g for g in groups if needle in _group_text(work_dir, g)]
+            # 一次读报告、建好"每组的可搜文本"，再筛。原来是每筛一组就调一次
+            # `_group_text()`（各自读一遍报告）——135 组就是 135 次整份解析。
+            texts = _group_texts(work_dir)
+            groups = [g for g in groups if keyword in texts.get(g.get('index'), '')]
 
         signature = merge_mod.report_signature(index)
         removed = merge_mod.read_removed_titles(work_dir)
@@ -449,20 +451,23 @@ class GroupsHandler(BaseHandler):
         }
 
 
-def _group_text(work_dir, group):
-    """把一组里所有成员的书名/作者拍成一段小写文本，供关键字筛选。"""
+def _group_texts(work_dir):
+    """`{组序号: "成员书名与作者拼成的小写文本"}`，供 `/groups` 的关键字筛选。
+
+    只读一次报告：这类筛选要拿**全部成员**的书名/作者去匹配（索引里只有前 2 个预览，
+    用它筛会漏），所以必须回到报告；但一次建好即可，不必每组读一遍。
+    """
     report = driver.read_report(work_dir)
     if not report:
-        return ''
-    members = report.get('groups') or []
-    index = group.get('index')
-    if index is None or index >= len(members):
-        return ''
-    parts = []
-    for member in members[index].get('members') or []:
-        parts.append(str(member.get('title') or ''))
-        parts.extend(str(a) for a in (member.get('authors') or []))
-    return ' '.join(parts).lower()
+        return {}
+    texts = {}
+    for position, group in enumerate(report.get('groups') or []):
+        parts = []
+        for member in group.get('members') or []:
+            parts.append(str(member.get('title') or ''))
+            parts.extend(str(a) for a in (member.get('authors') or []))
+        texts[position] = ' '.join(parts).lower()
+    return texts
 
 
 class GroupHandler(BaseHandler):

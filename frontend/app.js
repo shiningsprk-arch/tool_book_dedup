@@ -120,9 +120,9 @@
     filteredTotal: 0,
     mergedIds: [],
     removedTitles: [],
-    active: null,        // 当前打开的分组
-    keeperId: null,
-    plan: null,
+    active: null,        // 当前展开的分组 {index, group, keeperId}
+    groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
+    plan: null,          // 当前展开的合并预览（属于 active 那一组）
     pollTimer: null,
   };
 
@@ -134,11 +134,7 @@
       'run-card', 'run-label', 'run-count', 'run-bar', 'run-detail',
       'summary-card', 'summary', 'filter-confidence', 'filter-keyword',
       'list-meta', 'groups', 'pager', 'pager-label', 'btn-prev', 'btn-next',
-      'empty-state', 'handled-card', 'handled-list',
-      'bench-overlay', 'bench-body', 'bench-title', 'bench-close', 'bench-hint',
-      'btn-merge', 'btn-preview',
-      'plan-overlay', 'plan-body', 'plan-title', 'plan-close', 'plan-hint',
-      'btn-apply', 'plan-cancel', 'delete-source', 'toasts',
+      'empty-state', 'handled-card', 'handled-list', 'toasts',
     ].forEach(function (id) {
       el[id] = document.getElementById(id);
     });
@@ -160,15 +156,9 @@
     if (!el || !el['scope-hint']) return;
     el['scope-hint'].textContent = scopeHintText();
     if (state.scan) renderSummary(state.scan);
+    // 列表行与行内抽屉都是拼出来的字符串，重画一次即跟上新语言
     if (state.groups && state.groups.length) {
       renderList({ generated_at: state.generatedAt });
-    }
-    if (state.active && el['bench-overlay'] && !el['bench-overlay'].hidden) {
-      el['bench-body'].innerHTML = benchBodyHtml(state.active.group, state.active.keeperId);
-      bindBench();
-    }
-    if (state.plan && el['plan-overlay'] && !el['plan-overlay'].hidden) {
-      renderPlan(state.plan);
     }
     renderHandled();
   };
@@ -265,22 +255,9 @@
       var maxPage = Math.ceil(state.filteredTotal / state.pageSize) - 1;
       if (state.page < maxPage) { state.page += 1; loadGroups(); }
     });
-    el['bench-close'].addEventListener('click', closeBench);
-    el['btn-preview'].addEventListener('click', function () { openPlan(false); });
-    el['btn-merge'].addEventListener('click', function () { openPlan(true); });
-    el['plan-close'].addEventListener('click', closePlan);
-    el['plan-cancel'].addEventListener('click', closePlan);
-    el['btn-apply'].addEventListener('click', applyMerge);
-    el['bench-overlay'].addEventListener('click', function (event) {
-      if (event.target === el['bench-overlay']) closeBench();
-    });
-    el['plan-overlay'].addEventListener('click', function (event) {
-      if (event.target === el['plan-overlay']) closePlan();
-    });
+    // ESC 收起当前展开的那一行（没有浮层可关了）
     document.addEventListener('keydown', function (event) {
-      if (event.key !== 'Escape') return;
-      if (!el['plan-overlay'].hidden) closePlan();
-      else if (!el['bench-overlay'].hidden) closeBench();
+      if (event.key === 'Escape' && state.active) collapseRow();
     });
 
     loadScope();
@@ -497,10 +474,11 @@
       .replace('{at}', data.generated_at || '—');
 
     var active = state.active;
+    // 展开的抽屉就渲染在**对应的那一行之内**（原来是 `+ expandedHtml(active)` 追加到整页末尾，
+    // 再叠一个居中浮层——真机反馈"报告总是在最中间显示"就是那个浮层）
     el.groups.innerHTML = state.groups.map(function (group) {
-      var expanded = active && active.index === group.index;
-      return rowHtml(group, expanded);
-    }).join('') + (expandedHtml(active));
+      return rowHtml(group, !!(active && active.index === group.index));
+    }).join('');
 
     el['pager'].hidden = state.filteredTotal <= state.pageSize;
     var maxPage = Math.max(0, Math.ceil(state.filteredTotal / state.pageSize) - 1);
@@ -516,56 +494,201 @@
         : t('list.emptyClean', '没有发现重复书籍');
     }
 
+    bindRows();
+    bindDrawer();
+  }
+
+  function bindRows() {
     el.groups.querySelectorAll('[data-open]').forEach(function (node) {
-      node.addEventListener('click', function () { openBench(Number(node.getAttribute('data-open'))); });
-    });
-    el.groups.querySelectorAll('[data-pick]').forEach(function (node) {
-      node.addEventListener('click', function (event) {
-        event.stopPropagation();
-        pickKeeper(Number(node.getAttribute('data-pick')));
-      });
-    });
-    el.groups.querySelectorAll('[data-jump]').forEach(function (node) {
-      node.addEventListener('click', function (event) {
-        event.stopPropagation();
-        openBook(Number(node.getAttribute('data-jump')));
+      node.addEventListener('click', function () {
+        toggleRow(Number(node.getAttribute('data-open')));
       });
     });
   }
 
-  function rowHtml(group, expanded) {
-    var members = group.members_preview;
-    var title = expanded && state.active && state.active.group
-      ? state.active.group.members.map(function (m) { return m.title; }).join(' | ')
-      : t('list.groupTitle', '{n} 本可能是同一本书').replace('{n}', group.member_count);
-    return '<article class="bd-group' + (expanded ? ' bd-group-open' : '') + '">' +
+  function rowHtml(group, open) {
+    return '<article class="bd-group' + (open ? ' bd-group-open' : '') +
+        '" data-group="' + group.index + '">' +
       '<button class="bd-group-head" data-open="' + group.index + '">' +
         '<span class="bd-chip bd-chip-' + escapeHtml(group.confidence) + '">' +
           escapeHtml(t(CONFIDENCE_KEYS[group.confidence], group.confidence)) + '</span>' +
-        '<span class="bd-group-title">' + escapeHtml(title) + '</span>' +
+        '<span class="bd-group-title">' + groupTitleHtml(group) + '</span>' +
         '<span class="bd-group-meta">' +
           escapeHtml(formatBytes(group.reclaimable_bytes)) + ' · ' +
           escapeHtml(t('list.sameFormat', '同格式 {v}').replace('{v}', formatBytes(group.disk_waste_bytes))) +
         '</span>' +
+        '<span class="bd-group-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span>' +
       '</button>' +
-      (expanded ? '' : '<div class="bd-group-preview" hidden></div>') +
+      (open ? drawerHtml(state.active, state.plan) : '') +
       '</article>';
   }
 
-  function expandedHtml(active) {
+  /** 行标题：直接列出成员书名，而不是"x 本可能是同一本书"。 */
+  function groupTitleHtml(group) {
+    var titles = group.titles || [];
+    if (!titles.length) {
+      // 旧报告（写它的时候索引里还没有 titles）→ 回落旧文案，升级不该让列表变空
+      return escapeHtml(t('list.groupTitle', '{n} 本可能是同一本书')
+        .replace('{n}', group.member_count));
+    }
+    var separator = t('list.titleJoin', '、');
+    var text = titles.map(function (title) { return '《' + title + '》'; }).join(separator);
+    if (group.preview_truncated) {
+      text += ' ' + t('list.membersMore', '等 {n} 本').replace('{n}', group.member_count);
+    }
+    var html = escapeHtml(text);
+    // 作者只在预览的几本**同属一人**时才显示——否则一列两个作者反而更难读
+    var authors = group.authors || [];
+    var sameAuthor = authors.length > 0 && authors.every(function (name) {
+      return name && name === authors[0];
+    });
+    if (sameAuthor) {
+      html += '<span class="bd-group-author">' + escapeHtml(authors[0]) + '</span>';
+    }
+    return html;
+  }
+
+  /** 抽屉（详情）——就在这一行之内。 */
+  function drawerHtml(active, plan) {
     if (!active || !active.group) return '';
-    return '<section class="bd-bench-inline">' + benchBodyHtml(active.group, active.keeperId) + '</section>';
+    var inner = benchBodyHtml(active.group, active.keeperId);
+    if (plan && plan.index === active.index) inner += planHtml(plan);
+    return '<section class="bd-drawer">' + inner + '</section>';
+  }
+
+  // ---------------------------------------------------------------- 展开 / 收起
+
+  function toggleRow(index) {
+    if (state.active && state.active.index === index) {
+      collapseRow();
+      return;
+    }
+    state.plan = null;                       // 换了一组，上一组的合并预览作废
+    var cached = state.groupCache[index];
+    if (cached) {
+      setActive(index, cached);
+      return;
+    }
+    setRowLoading(index, true);
+    api('group?index=' + index).then(function (resp) {
+      setRowLoading(index, false);
+      if (!resp || resp.err !== 'ok') {
+        notify((resp && resp.msg) || t('bench.failed', '读取分组失败'), 'error');
+        return;
+      }
+      state.groupCache[index] = resp.data.group;
+      setActive(index, resp.data.group);
+    }).catch(function () {
+      setRowLoading(index, false);
+      notify(t('bench.failed', '读取分组失败'), 'error');
+    });
+  }
+
+  function setActive(index, group) {
+    state.active = {
+      index: index,
+      group: group,
+      keeperId: (group.recommendation || {}).keeper_id,
+    };
+    refreshDrawer();
+  }
+
+  function collapseRow() {
+    state.active = null;
+    state.plan = null;
+    refreshDrawer();
+  }
+
+  function pickKeeper(bookId) {
+    if (!state.active) return;
+    state.active.keeperId = bookId;
+    // 换了保留项 → 之前生成的合并预览作废（它的 keeper_id 已经指向别的书了）
+    state.plan = null;
+    refreshDrawer();
+  }
+
+  function setRowLoading(index, loading) {
+    var row = el.groups.querySelector('.bd-group[data-group="' + index + '"]');
+    if (row) row.classList.toggle('bd-group-loading', !!loading);
+  }
+
+  /** 只重画抽屉：改保留项、开关合并预览都走这里。
+   *
+   * **不重画整个列表**——全量重画会把滚动位置重置掉，正在看的那一行会跳走
+   * （原来 `pickKeeper()` 里调 `loadGroups()` 就有这个毛病）。
+   */
+  function refreshDrawer() {
+    if (!el.groups) return;
+    var drawer = el.groups.querySelector('.bd-drawer');
+    var html = drawerHtml(state.active, state.plan);
+    if (drawer) {
+      if (html) {
+        drawer.outerHTML = html;             // 就地替换
+      } else {
+        drawer.remove();
+      }
+    } else if (html) {
+      // 抽屉还没建出来（首次展开）→ 交给整表重画，它会在该行之内建好
+      renderList({ generated_at: state.generatedAt });
+      return;
+    }
+    // 行头的展开态跟着 state.active 走
+    el.groups.querySelectorAll('.bd-group[data-group]').forEach(function (row) {
+      var open = !!(state.active &&
+        String(state.active.index) === row.getAttribute('data-group'));
+      row.classList.toggle('bd-group-open', open);
+      var caret = row.querySelector('.bd-group-caret');
+      if (caret) caret.textContent = open ? '▾' : '▸';
+    });
+    bindDrawer();
+  }
+
+  function bindDrawer() {
+    var drawer = el.groups.querySelector('.bd-drawer');
+    if (!drawer) return;
+    drawer.querySelectorAll('[data-pick]').forEach(function (node) {
+      node.addEventListener('click', function () {
+        pickKeeper(Number(node.getAttribute('data-pick')));
+      });
+    });
+    drawer.querySelectorAll('[data-jump]').forEach(function (node) {
+      node.addEventListener('click', function () {
+        openBook(Number(node.getAttribute('data-jump')));
+      });
+    });
+    var preview = drawer.querySelector('[data-preview]');
+    if (preview) preview.addEventListener('click', openPlan);
+    var collapse = drawer.querySelector('[data-collapse]');
+    if (collapse) collapse.addEventListener('click', collapseRow);
+    var apply = drawer.querySelector('[data-apply]');
+    if (apply) apply.addEventListener('click', applyMerge);
+    var cancel = drawer.querySelector('[data-plan-cancel]');
+    if (cancel) cancel.addEventListener('click', function () {
+      state.plan = null;
+      refreshDrawer();
+    });
   }
 
   function benchBodyHtml(group, keeperId) {
     var members = group.members || [];
     var recommendation = group.recommendation || {};
     var keeper = keeperId || recommendation.keeper_id;
-    var reasons = (recommendation.reasons || []).map(keeperReasonText).join('、');
+    // 理由只对"工具自动推荐的那本"成立。用户改选了别的书之后，原来那串理由
+    // （"格式最多（2）"之类）其实是按另一本算的，照抄会变成假信息——改成如实说是手动选的。
+    var manual = !!(keeperId && recommendation.keeper_id && keeperId !== recommendation.keeper_id);
+    // 两个分支都写成字面量 `t('键', 兜底)`：用变量拼键会让"用到的键"静态对账不出来
+    // （前端契约测试专门盯着这一点），也让这里看不出有哪几条文案。
+    var label = manual
+      ? t('bench.yourPick', '保留这本：{title}')
+      : t('bench.recommend', '推荐保留：{title}');
+    var reasonText = manual
+      ? t('keep.manual', '你手动选择')
+      : (recommendation.reasons || []).map(keeperReasonText).join('、');
 
-    var head = '<p class="bd-hint">' + escapeHtml(t('bench.recommend', '推荐保留：{title}'))
-      .replace('{title}', titleOf(members, keeper)) +
-      (reasons ? ' · ' + escapeHtml(reasons) : '') + '</p>';
+    // 书名先替换进模板、整体再转义一次（与 plan.step / handled.item 一致）
+    var head = '<p class="bd-hint">' +
+      escapeHtml(label.replace('{title}', titleOf(members, keeper))) +
+      (reasonText ? ' · ' + escapeHtml(reasonText) : '') + '</p>';
 
     var cards = members.map(function (member) {
       var isKeeper = member.id === keeper;
@@ -590,7 +713,17 @@
     }).join('');
 
     var table = diffTableHtml(group.diff, members, keeper);
-    return head + '<div class="bd-copies">' + cards + '</div>' + table;
+    // 动作按钮与安全提示都搬进抽屉：没有浮层了，合并预览也在同一块里就地展开
+    var actions =
+      '<div class="bd-drawer-actions">' +
+        '<button class="bd-btn bd-btn-primary" data-preview="1">' +
+          escapeHtml(t('bench.preview', '先看合并预览')) + '</button>' +
+        '<button class="bd-btn" data-collapse="1">' +
+          escapeHtml(t('bench.collapse', '收起')) + '</button>' +
+      '</div>' +
+      '<p class="bd-hint bd-warn-hint">' + escapeHtml(t('bench.hint',
+        '删除源记录会连带失去它的收藏/在读/阅读进度/评分/书单，请先确认要保留哪一本。')) + '</p>';
+    return head + '<div class="bd-copies">' + cards + '</div>' + table + actions;
   }
 
   function titleOf(members, bookId) {
@@ -635,85 +768,27 @@
     }).join('');
   }
 
-  // ---------------------------------------------------------------- 对照台
+  // ---------------------------------------------------------------- 合并预览 / 执行
 
-  function openBench(index) {
-    api('group?index=' + index).then(function (resp) {
-      if (!resp || resp.err !== 'ok') {
-        notify((resp && resp.msg) || t('bench.failed', '读取分组失败'), 'error');
-        return;
-      }
-      var group = resp.data.group;
-      state.active = {
-        index: index,
-        group: group,
-        keeperId: (group.recommendation || {}).keeper_id,
-      };
-      el['bench-title'].textContent = t('bench.title', '重复项对照');
-      el['bench-body'].innerHTML = benchBodyHtml(group, state.active.keeperId);
-      el['bench-hint'].textContent = t('bench.hint',
-        '删除源记录会连带丢失它的收藏/在读/进度/评分/书单，请先确认要保留哪一本。');
-      el['bench-overlay'].hidden = false;
-      bindBench();
-      // 同时在列表里展开，关闭后位置不跳
-      state.page = Math.floor(index / state.pageSize);
-      loadGroups();
-    });
-  }
-
-  function bindBench() {
-    var root = el['bench-body'];
-    root.querySelectorAll('[data-pick]').forEach(function (node) {
-      node.addEventListener('click', function () {
-        state.active.keeperId = Number(node.getAttribute('data-pick'));
-        el['bench-body'].innerHTML = benchBodyHtml(state.active.group, state.active.keeperId);
-        bindBench();
-      });
-    });
-    root.querySelectorAll('[data-jump]').forEach(function (node) {
-      node.addEventListener('click', function () {
-        openBook(Number(node.getAttribute('data-jump')));
-      });
-    });
-  }
-
-  function pickKeeper(bookId) {
+  function openPlan() {
     if (!state.active) return;
-    state.active.keeperId = bookId;
-    var root = el['bench-body'];
-    if (root) { root.innerHTML = benchBodyHtml(state.active.group, bookId); bindBench(); }
-    loadGroups();
+    var index = state.active.index;
+    api('merge_plan?index=' + index + '&keeper_id=' + state.active.keeperId)
+      .then(function (resp) {
+        if (!resp || resp.err !== 'ok') {
+          notify((resp && resp.msg) || t('plan.failed', '生成合并预览失败'), 'error');
+          return;
+        }
+        state.plan = resp.data || {};
+        state.plan.index = index;      // 兜一层：预览归属必须与当前展开的组一致
+        refreshDrawer();
+        var node = el.groups.querySelector('.bd-plan');
+        if (node && node.scrollIntoView) node.scrollIntoView({ block: 'nearest' });
+      });
   }
 
-  function closeBench() {
-    el['bench-overlay'].hidden = true;
-    state.active = null;
-    loadGroups();
-  }
-
-  // ---------------------------------------------------------------- 合并
-
-  function openPlan(execute) {
-    if (!state.active) return;
-    var payload = {
-      index: state.active.index,
-      keeper_id: state.active.keeperId,
-      keep_rule: 'metadata',
-    };
-    api('merge_plan?index=' + payload.index +
-        '&keeper_id=' + payload.keeper_id).then(function (resp) {
-      if (!resp || resp.err !== 'ok') {
-        notify((resp && resp.msg) || t('plan.failed', '生成合并预览失败'), 'error');
-        return;
-      }
-      state.plan = resp.data;
-      renderPlan(state.plan);
-      el['plan-overlay'].hidden = false;
-      if (execute) notify(t('plan.hint', '请确认后再执行'), 'info');
-    });
-  }
-
-  function renderPlan(plan) {
+  /** 合并预览块（渲染在抽屉里，不再是浮层）。 */
+  function planHtml(plan) {
     var warnings = [
       t('plan.warnDrop', '同名格式不会被复制：源书的同名文件会被丢弃，留下的是保留项的那一份。'),
       t('plan.warnMigrate', '源记录的收藏/在读/阅读进度/评分/书单不会被迁移（工具箱删除不清理关联数据）。'),
@@ -732,8 +807,8 @@
         '</ul></li>';
     }).join('');
 
-    el['plan-title'].textContent = t('plan.title', '合并预览');
-    el['plan-body'].innerHTML =
+    return '<div class="bd-plan">' +
+      '<h3 class="bd-plan-title">' + escapeHtml(t('plan.title', '合并预览')) + '</h3>' +
       '<p class="bd-plan-head">' + escapeHtml(t('plan.keep', '保留：{title}')
         .replace('{title}', plan.keeper_title)) + '</p>' +
       '<ul class="bd-plan-steps">' + steps + '</ul>' +
@@ -744,29 +819,37 @@
       '</div>' +
       '<ul class="bd-warnings">' + warnings.map(function (text) {
         return '<li>' + escapeHtml(text) + '</li>';
-      }).join('') + '</ul>';
-    el['plan-hint'].textContent = '';
-  }
-
-  function closePlan() {
-    el['plan-overlay'].hidden = true;
-    el['btn-apply'].disabled = false;
+      }).join('') + '</ul>' +
+      '<label class="bd-check">' +
+        '<input type="checkbox" data-delete-source checked>' +
+        '<span>' + escapeHtml(t('plan.deleteSource',
+          '同时删除重复记录（不勾则只合并格式，保留两条记录，之后可自行处理）')) + '</span>' +
+      '</label>' +
+      '<div class="bd-drawer-actions">' +
+        '<button class="bd-btn bd-btn-primary" data-apply="1">' +
+          escapeHtml(t('plan.apply', '确认合并')) + '</button>' +
+        '<button class="bd-btn" data-plan-cancel="1">' +
+          escapeHtml(t('plan.cancel', '取消')) + '</button>' +
+      '</div>' +
+    '</div>';
   }
 
   function applyMerge() {
     if (!state.plan) return;
-    el['btn-apply'].disabled = true;
+    var checkbox = el.groups.querySelector('[data-delete-source]');
+    var button = el.groups.querySelector('[data-apply]');
+    if (button) button.disabled = true;
     api('merge', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         index: state.plan.index,
         keeper_id: state.plan.keeper_id,
-        delete_source: el['delete-source'].checked,
+        delete_source: !checkbox || checkbox.checked,
       }),
     }).then(function (resp) {
-      el['btn-apply'].disabled = false;
       if (!resp || resp.err !== 'ok') {
+        if (button) button.disabled = false;
         notify((resp && resp.msg) || t('plan.applyFailed', '合并失败'), 'error');
         return;
       }
@@ -776,10 +859,14 @@
         .replace('{m}', data.moved_total || 0)
         .replace('{d}', (data.removed_ids || []).length),
         'success');
-      closePlan();
-      closeBench();
+      var done = state.active ? state.active.index : null;
+      state.active = null;
+      state.plan = null;
+      if (done !== null) delete state.groupCache[done];
+      // 该组已只剩一本 → 后端 /groups 会把它摘掉，整表刷新一次
+      loadGroups();
     }).catch(function () {
-      el['btn-apply'].disabled = false;
+      if (button) button.disabled = false;
       notify(t('plan.applyFailed', '合并失败'), 'error');
     });
   }

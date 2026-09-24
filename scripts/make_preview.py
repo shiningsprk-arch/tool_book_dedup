@@ -66,25 +66,10 @@ def build_data():
     book_ids = sorted(api.calibre._books)
     built = driver.run_scan(api, book_ids, threshold=0.85,
                             scope_note='预览数据（真实引擎产出）')
-    index = {
-        'generated_at': built['generated_at'],
-        'threshold': built['threshold'],
-        'summary': built['summary'],
-        'stats': built['stats'],
-        'scanned_books': built['scanned_books'],
-        'groups': [
-            {
-                'index': position,
-                'members': [m['id'] for m in group['members']],
-                'keeper_id': (group.get('recommendation') or {}).get('keeper_id'),
-                'confidence': group.get('confidence'),
-                'member_count': group.get('member_count'),
-                'reclaimable_bytes': group.get('reclaimable_bytes', 0),
-                'disk_waste_bytes': group.get('disk_waste_bytes', 0),
-            }
-            for position, group in enumerate(built['groups'])
-        ],
-    }
+    # 索引**走真的 `driver.write_index()`**，不在这里手搓一份。
+    # 手搓过一版，结果后端加了 `titles`/`authors` 预览字段之后预览里看不到——
+    # 两份形状各自演化，正是"预览与真机不一致"的来源。
+    index = driver.write_index(os.path.join(PREVIEW, '_index'), built)
     return built, index
 
 

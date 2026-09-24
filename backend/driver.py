@@ -12,6 +12,7 @@
 import json
 import logging
 import os
+import threading
 import time
 
 from .dedup import cluster, keeper, metadata, report
@@ -264,6 +265,16 @@ INDEX_FILENAME = 'index.json'
 # 不随 task_id 变——宿主重启后内存里的任务就没了，靠它把报告认回来。
 LATEST_MARKER = 'latest.json'
 
+# 列表每行预览几个书名（其余点开抽屉看全部）。用户定的值：2。
+# 存进索引而不是让前端去读报告：`/groups` 只读索引，几 KB 的代价换"列表直接可读"。
+PREVIEW_TITLES = 2
+
+# 报告解析缓存。报告是 MB 级，而 `/group`（每点一行）与 `/groups` 的关键字筛选都要
+# **整份解析**一遍：135 组点下来就是 135 次 `json.load`，非常明显。按
+# `(路径, mtime_ns, 大小)` 认版本，只留最后一份，避免无界内存。
+_REPORT_CACHE = {'key': None, 'report': None}
+_REPORT_CACHE_LOCK = threading.Lock()
+
 
 def report_path(work_dir):
     return os.path.join(work_dir, REPORT_FILENAME)
@@ -284,16 +295,35 @@ def write_report(work_dir, report):
     return report_path(work_dir)
 
 
-def read_report(work_dir, group_index=None):
-    """读报告；给了 `group_index` 就只回那一组（组可能很大，别整份塞给前端）。"""
-    path = report_path(work_dir)
-    if not os.path.exists(path):
+def _load_report(path):
+    """按 (路径, mtime, 大小) 缓存解析结果，避免每点一行都重解析整份报告。"""
+    try:
+        stat = os.stat(path)
+    except OSError:
         return None
+    key = (path, stat.st_mtime_ns, stat.st_size)
+    with _REPORT_CACHE_LOCK:
+        if _REPORT_CACHE['key'] == key:
+            return _REPORT_CACHE['report']
     try:
         with open(path, 'r', encoding='utf-8') as handle:
             report = json.load(handle)
     except (OSError, ValueError) as err:
         logging.warning('[book_dedup] report unreadable %s: %s', path, err)
+        return None
+    with _REPORT_CACHE_LOCK:
+        _REPORT_CACHE['key'] = key
+        _REPORT_CACHE['report'] = report
+    return report
+
+
+def read_report(work_dir, group_index=None):
+    """读报告；给了 `group_index` 就只回那一组（组可能很大，别整份塞给前端）。"""
+    path = report_path(work_dir)
+    if not os.path.exists(path):
+        return None
+    report = _load_report(path)
+    if report is None:
         return None
     if group_index is None:
         return report
@@ -308,18 +338,30 @@ def read_report(work_dir, group_index=None):
 
 
 def write_index(work_dir, report):
-    """写"组 → 成员 id / 推荐保留 / 可回收"的轻量索引。
+    """写"组 → 成员 id / 推荐保留 / 可回收 / 成员预览"的轻量索引。
 
-    存在的理由：`/groups` 要分页、`/merge` 再跑一次引擎就会得到**另一批 id**
-    （`group_pairs` 的簇根依赖并查集遍历顺序）。所以按索引把这次的成员 id 固化下来，
-    合并、展示、报告三处必须用同一批 id。
+    存在的理由（两条）：
+
+    1. `/groups` 要分页、`/merge` 再跑一次引擎就会得到**另一批 id**（`group_pairs` 的簇根
+       依赖并查集遍历顺序）。所以按索引把这次的成员 id 固化下来，合并、展示、报告三处必须
+       用同一批 id。
+    2. **列表行要直接可读**。只给 `member_count` 的话每行都只能写"x 本可能是同一本书"，
+       用户必须逐行点开才知道是哪些书（真机反馈原话：不直观、不合理）。所以顺带存
+       `PREVIEW_TITLES` 个成员标题与作者——组索引只多几 KB，列表却一眼能读。
     """
     groups = report.get('groups') or []
     index = []
     for position, group in enumerate(groups):
+        members = group['members']
+        previews = members[:PREVIEW_TITLES]
         index.append({
             'index': position,
-            'members': [m['id'] for m in group['members']],
+            'members': [m['id'] for m in members],
+            # `titles`/`members` 必须**同序**，两边都取自同一份 `group['members']`——
+            # 顺序错位会让界面把"保留项"标到别的书上
+            'titles': [m.get('title') or '' for m in previews],
+            'authors': [(m.get('authors') or [''])[0] for m in previews],
+            'preview_truncated': len(members) > PREVIEW_TITLES,
             'keeper_id': (group.get('recommendation') or {}).get('keeper_id'),
             'confidence': group.get('confidence'),
             'member_count': group.get('member_count'),

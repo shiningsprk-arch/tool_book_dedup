@@ -3,9 +3,9 @@
  * 颜色一律用 theme.css 里的 --mb-color-* 变量，深浅色由宿主通过 bridge.theme 切换
  * <body data-theme>，这里不写第二套深色规则。
  *
- * 一条硬约束：`.bd-overlay` 用 display:flex 做居中，会盖过 [hidden] 的 display:none ——
- * 所以文件末尾必须有 `[hidden] { display: none !important }`。quality_check 踩过这个坑
- * （空弹层一直挂在页面上挡点击）。
+ * 一条硬约束（quality_check 踩过）：任何用 display 覆盖了默认值的元素，[hidden] 都要显式
+ * 压住，否则会一直挂在页面上挡点击。所以文件末尾必须有 `[hidden] { display: none !important }`。
+ * 本文件的浮层（.bd-overlay）已按真机反馈删除——详情改为行内抽屉（.bd-drawer）。
  */
 
 .bd-wrap {
@@ -68,7 +68,7 @@
 }
 
 .bd-actions,
-.bd-foot-actions {
+.bd-drawer-actions {
   display: flex;
   gap: 8px;
   margin-top: 12px;
@@ -199,10 +199,41 @@
 .bd-chip-certain { color: var(--mb-color-success); }
 .bd-chip-keep { color: var(--mb-color-primary); }
 
-.bd-bench-inline {
+.bd-group-caret {
+  color: var(--mb-color-text-secondary);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+.bd-group-author {
+  color: var(--mb-color-text-secondary);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+/* 正在取详情（首次展开时要读一次报告） */
+.bd-group-loading .bd-group-caret { opacity: .3; }
+
+/* 详情抽屉：**就在这一行之内**，不再是居中浮层。
+   打开时该行整体加一圈主色描边，让"哪一行展开着"一眼可见。 */
+.bd-drawer {
   border-top: 1px solid var(--mb-color-border);
   padding: 12px;
   background: var(--mb-color-surface);
+}
+
+.bd-warn-hint { color: var(--mb-color-warning); }
+
+.bd-plan {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--mb-color-border);
+}
+
+.bd-plan-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 /* ---------------------------------------------------------------- 对照卡 */
@@ -290,50 +321,7 @@
   font-size: 12px;
 }
 
-/* ---------------------------------------------------------------- 弹层 */
-
-.bd-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, .45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  z-index: 50;
-}
-
-.bd-sheet {
-  background: var(--mb-color-bg);
-  color: var(--mb-color-text);
-  border: 1px solid var(--mb-color-border);
-  border-radius: var(--mb-radius);
-  width: min(980px, 100%);
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.bd-sheet-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--mb-color-border);
-}
-
-.bd-sheet-head h2 { margin: 0; font-size: 15px; }
-
-.bd-sheet-body {
-  padding: 14px 16px;
-  overflow-y: auto;
-  flex: 1 1 auto;
-}
-
-.bd-sheet-foot {
-  border-top: 1px solid var(--mb-color-border);
-  padding: 12px 16px;
-}
+/* ---------------------------------------------------------------- 合并预览（行内） */
 
 .bd-plan-head { font-weight: 600; margin: 0 0 8px; }
 .bd-plan-steps { margin: 0 0 10px; padding-left: 18px; }
@@ -407,5 +395,7 @@
   .bd-diff td:last-child { border-bottom: 0; }
 }
 
-/* 必须放在最后：.bd-overlay 的 display:flex 会盖过 [hidden] 的默认 display:none */
+/* 必须放在最后：任何用 display 覆盖了默认值的元素，[hidden] 都得显式压住。
+   （本文件里 .bd-overlay 那类浮层已经删掉，但列表外围与卡片仍有 hidden 节点，
+   所以这条继续保留。） */
 [hidden] { display: none !important; }

@@ -25,6 +25,14 @@ def read(path):
         return handle.read()
 
 
+def strip_comments(text):
+    """去掉注释，只留"活的代码"——注释里提到某个已删的类名不该触发断言。"""
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)      # HTML
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)      # 块注释（JS/CSS）
+    text = re.sub(r'(?m)^\s*//.*$', '', text)               # 行首行注释（JS）
+    return text
+
+
 def used_keys():
     """前端实际引用的 i18n 键：t('..')、data-i18n、data-i18n-attr，以及几张映射表。"""
     js = read(os.path.join(FRONTEND, 'app.js'))
@@ -135,6 +143,50 @@ class TestFrontendWiring(unittest.TestCase):
         # 只允许极少数不可避免的字面量（如遮罩的半透明黑）
         self.assertLessEqual(len(offenders), 1,
                              '样式里出现了硬编码颜色：%s' % offenders)
+
+    def test_overlays_are_gone(self):
+        """**回归**：详情不许回到居中浮层。
+
+        真机反馈"报告总是在最中间显示"——根因是 `.bd-overlay` 的 `position:fixed;inset:0;
+        display:flex;align-items:center` 把内容钉在屏幕正中、盖住列表。详情现在渲染在
+        被点那一行之内（`.bd-drawer`），所以浮层 DOM、样式、引用都不该再出现。
+
+        查的是**剥掉注释后的代码**：文件名里保留一段"为什么删掉浮层"的说明是有价值的，
+        不该因为提到这几个词就把测试判红。
+        """
+        targets = (('index.html', strip_comments(self.html)),
+                   ('app.js', strip_comments(self.js)),
+                   ('book_dedup.css', strip_comments(self.css)))
+        for label, text in targets:
+            for needle in ('bd-overlay', 'bd-sheet', 'bench-overlay', 'plan-overlay'):
+                self.assertNotIn(needle, text, '%s 里还有活的 %s 引用' % (label, needle))
+
+    def test_drawer_renders_inside_its_row(self):
+        """抽屉必须由行模板生成，而不是追加到列表末尾/单独的浮层节点。"""
+        self.assertIn("'<section class=\"bd-drawer\">'", self.js)
+        # 行模板里带 data-group，重画时靠它定位到"哪一行"
+        self.assertIn('data-group=\"', self.js)
+        self.assertIn('bd-drawer', self.css)
+
+    def test_row_title_lists_member_titles(self):
+        """列表行要直接列书名——不能只有"x 本可能是同一本书"。"""
+        self.assertIn('group.titles', self.js)
+        self.assertIn('preview_truncated', self.js)
+        self.assertIn('list.membersMore', self.js)
+        # 旧报告没有 titles 时要有回落，别因为升级就显示空白
+        self.assertIn("t('list.groupTitle'", self.js)
+
+    def test_keeper_pick_does_not_rerender_whole_list(self):
+        """改保留项只重画抽屉。
+
+        原来 `pickKeeper()` 里调 `loadGroups()` 全量重画，会把滚动位置重置掉——
+        正在看的那一行会跳走。
+        """
+        match = re.search(r'function pickKeeper\(bookId\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIsNotNone(match, '找不到 pickKeeper 的定义')
+        body = match.group(1)
+        self.assertIn('refreshDrawer()', body)
+        self.assertNotIn('loadGroups()', body)
 
     def test_no_absolute_api_paths(self):
         """工具接口必须走桥（相对路径）；唯一例外是本地预览的兜底分支。
