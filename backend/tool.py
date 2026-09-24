@@ -38,7 +38,7 @@ from webserver.services import AsyncService
 from webserver.services.background_service import BackgroundService, BackgroundTask
 from webserver.toolbox.base_tool import BaseTool
 
-from . import driver, merge as merge_mod
+from . import driver, write_ops
 from .dedup import report as report_mod
 
 # 单次扫描最多覆盖的书本数（与 driver 的上限一致）
@@ -72,7 +72,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.2',
+            'revision': '0.1.3',
             'author': '黏菌',
             'publish_date': '2026-09-23',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
@@ -291,7 +291,7 @@ class ScopeHandler(BaseHandler):
                 'threshold': driver.DEFAULT_THRESHOLD,
                 'threshold_range': [driver.MIN_THRESHOLD, driver.MAX_THRESHOLD],
                 'confidence': ['strong', 'likely', 'weak'],
-                'keep_rules': list(merge_mod.KEEP_RULES),
+                'keep_rules': list(write_ops.KEEP_RULES),
             },
         }
 
@@ -408,13 +408,13 @@ class GroupsHandler(BaseHandler):
             return {'err': 'report.not_found', 'msg': _('查重结果文件缺失或损坏')}
 
         groups = list(index.get('groups') or [])
-        merged_ids = set(merge_mod.read_merged_ids(work_dir))
-        # 已合并的成员不再出现：合并会真的删掉源记录，留在列表里会引导用户再次点它
+        # 已经不在书库的成员（合并掉的 + 单独删掉的）：留在列表里会引导用户再点一次，
+        # 拿它们去合并还会撞上"来源书籍不存在"。一组不足两本也就不必再处理。
+        gone = write_ops.gone_ids(work_dir)
         groups = [g for g in groups
-                  if not (set(g.get('members') or []) & merged_ids)]
+                  if len(set(g.get('members') or []) - gone) >= 2]
         for group in groups:
-            members = group.get('members') or []
-            group['merged_count'] = len([m for m in members if m in merged_ids])
+            group['gone_count'] = len(set(group.get('members') or []) & gone)
 
         confidence = self.get_argument('confidence', None)
         if confidence:
@@ -427,8 +427,8 @@ class GroupsHandler(BaseHandler):
             texts = _group_texts(work_dir)
             groups = [g for g in groups if keyword in texts.get(g.get('index'), '')]
 
-        signature = merge_mod.report_signature(index)
-        removed = merge_mod.read_removed_titles(work_dir)
+        signature = write_ops.report_signature(index)
+        removed = write_ops.read_removed_titles(work_dir)
         page = self.get_argument('page', '0')
         size = self.get_argument('size', '50')
         sliced, total = report_mod.paginate(groups, page=page, size=size)
@@ -445,8 +445,9 @@ class GroupsHandler(BaseHandler):
                 'filtered_total': total,
                 'page': int(page) if str(page).isdigit() else 0,
                 'groups': sliced,
-                'merged_ids': sorted(merged_ids),
+                'gone_ids': sorted(gone),
                 'removed_titles': removed,
+                'deleted_titles': write_ops.read_deleted_titles(work_dir),
             },
         }
 
@@ -489,17 +490,17 @@ class GroupHandler(BaseHandler):
         if not group:
             return {'err': 'group.not_found', 'msg': _('找不到该分组')}
 
-        merged_ids = set(merge_mod.read_merged_ids(work_dir))
+        gone = write_ops.gone_ids(work_dir)
         members = [m for m in (group.get('members') or [])
-                   if m.get('id') not in merged_ids]
+                   if m.get('id') not in gone]
         keep_rule = self.get_argument('keep_rule', None)
         if keep_rule or len(members) != len(group.get('members') or []):
-            # 成员变过（有成员被合并掉）或用户换了保留规则 → 重算推荐，不能沿用旧结论
+            # 成员变过（有成员被合并或删掉）或用户换了保留规则 → 重算推荐，不能沿用旧结论
             group = dict(group)
             group['members'] = members
-            group['recommendation'] = merge_mod.recommend_for_members(members, keep_rule)
+            group['recommendation'] = write_ops.recommend_for_members(members, keep_rule)
         return {'err': 'ok', 'data': {
-            'task_id': resolved, 'group': group, 'merged_ids': sorted(merged_ids)}}
+            'task_id': resolved, 'group': group, 'gone_ids': sorted(gone)}}
 
 
 class MergePlanHandler(BaseHandler):
@@ -516,7 +517,7 @@ class MergePlanHandler(BaseHandler):
         if not work_dir:
             return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
 
-        plan, error = merge_mod.build_plan(
+        plan, error = write_ops.build_plan(
             tool.api_proxy(), work_dir, index_arg,
             keeper_id=self.get_argument('keeper_id', None),
             keep_rule=self.get_argument('keep_rule', None),
@@ -551,7 +552,7 @@ class MergeHandler(BaseHandler):
         if not work_dir:
             return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
 
-        plan, error = merge_mod.build_plan(
+        plan, error = write_ops.build_plan(
             tool.api_proxy(), work_dir, index_arg,
             keeper_id=payload.get('keeper_id'),
             keep_rule=payload.get('keep_rule'),
@@ -559,7 +560,45 @@ class MergeHandler(BaseHandler):
         if error:
             return error
 
-        result = merge_mod.execute(tool.api_proxy(), work_dir, plan, delete_source=delete_source)
+        result = write_ops.execute(tool.api_proxy(), work_dir, plan, delete_source=delete_source)
+        if result.get('err') != 'ok':
+            return result
+        return {'err': 'ok', 'data': result['data']}
+
+
+class DeleteHandler(BaseHandler):
+    """POST /delete —— 单独删除一本重复书。**本工具的第二处写操作。**
+
+    请求体：``{"index": 3, "book_id": 14, "task_id": 7}``
+
+    与 `/merge` 同样的守门：只收分组序号 + 一个 book_id，且该 id 必须**是这一组当前的
+    成员**（服务端自己回索引里核对）。不接受前端传任意 id——否则一个构造出来的请求
+    就能删掉没被查出来的书。
+
+    删除的后果（界面文案必须与这里一致）：宿主侧会级联清理这本书记关联数据
+    （收藏/在读/进度/时长/评分/书评/共读记录/书单关联），**但那是删除不是迁移**——
+    它的阅读进度不会搬到同组的其它书上。
+    """
+
+    @js
+    @is_admin
+    async def post(self):
+        payload = _parse_body(self)
+        if payload is None:
+            return {'err': 'params.invalid', 'msg': _('请求体不是合法 JSON')}
+        index_arg = payload.get('index')
+        if index_arg is None:
+            return {'err': 'params.invalid', 'msg': _('缺少 index 参数')}
+        if payload.get('book_id') is None:
+            return {'err': 'params.invalid', 'msg': _('缺少 book_id 参数')}
+
+        tool = BookDedupTool()
+        work_dir, _resolved = _report_dir_for(tool, payload.get('task_id'))
+        if not work_dir:
+            return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
+
+        result = write_ops.execute_delete(
+            tool.api_proxy(), work_dir, index_arg, payload.get('book_id'))
         if result.get('err') != 'ok':
             return result
         return {'err': 'ok', 'data': result['data']}
@@ -585,6 +624,7 @@ ROUTES = (
     (r'group', GroupHandler),
     (r'merge_plan', MergePlanHandler),
     (r'merge', MergeHandler),
+    (r'delete', DeleteHandler),
     (r'cancel', CancelHandler),
 )
 

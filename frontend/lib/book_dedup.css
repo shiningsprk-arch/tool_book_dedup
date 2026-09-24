@@ -224,6 +224,31 @@
 
 .bd-warn-hint { color: var(--mb-color-warning); }
 
+/* 单本书的删除确认条：行内展开（不用弹层），危险动作要显眼但不刺眼 */
+.bd-confirm {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--mb-color-error);
+  border-radius: var(--mb-radius);
+  background: var(--mb-color-bg);
+}
+
+.bd-confirm-title { margin: 0 0 4px; font-weight: 600; }
+.bd-confirm .bd-hint { margin: 4px 0; }
+.bd-confirm-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+
+.bd-btn-danger {
+  color: var(--mb-color-error);
+  border-color: var(--mb-color-error);
+}
+
+.bd-btn-danger:hover:not(:disabled) {
+  background: var(--mb-color-error);
+  color: var(--mb-color-bg);
+}
+
+.bd-handled-deleted { color: var(--mb-color-error); }
+
 .bd-plan {
   margin-top: 14px;
   padding-top: 12px;

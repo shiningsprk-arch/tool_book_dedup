@@ -136,7 +136,7 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
  */
 (function (window) {
   'use strict';
-  var DATA = { report: null, index: null, merged: [] };
+  var DATA = { report: null, index: null, merged: [], deleted: [] };
   var failing = [];
 
   // 数据没就绪时的调用**挂起等待**，而不是立刻回错。
@@ -157,7 +157,8 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
     if (!DATA.report) {
       return ready.then(function () { return window.__previewApi(name, params); });
     }
-    var mergedIds = DATA.merged.map(function (m) { return m.id; });
+    var mergedIds = DATA.merged.map(function (m) { return m.id; })
+      .concat(DATA.deleted.map(function (d) { return d.id; }));
 
     if (name === 'scope') {
       return Promise.resolve({ err: 'ok', data: {
@@ -197,13 +198,16 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         removed_titles: DATA.merged.map(function (m) {
           return { id: m.id, title: m.title, into: m.into, at: m.at };
         }),
+        deleted_titles: DATA.deleted.map(function (d) {
+          return { id: d.id, title: d.title, at: d.at };
+        }),
       } });
     }
     if (name === 'group') {
       var position = parseInt(params.index, 10);
       var group = DATA.report.groups[position];
       if (!group) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
-      return Promise.resolve({ err: 'ok', data: { task_id: 7, group: group, merged_ids: mergedIds } });
+      return Promise.resolve({ err: 'ok', data: { task_id: 7, group: group, gone_ids: mergedIds } });
     }
     if (name === 'merge_plan') {
       var pos = parseInt(params.index, 10);
@@ -232,6 +236,23 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
         warnings: ['working_formats_dropped', 'source_records_not_migrated'],
         members: target.members, recommendation: target.recommendation,
       } });
+    }
+    if (name === 'delete') {
+      // 与 tool.DeleteHandler 同形状：只收 index + book_id，且必须**是这一组的成员**
+      var pos = parseInt(params.index, 10);
+      var target = DATA.report.groups[pos];
+      if (!target) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
+      var want = parseInt(params.book_id, 10);
+      var found = null;
+      target.members.forEach(function (m) { if (m.id === want) found = m; });
+      if (!found) {
+        return Promise.resolve({ err: 'book.not_in_group', msg: '要删除的书必须是这一组里的成员' });
+      }
+      DATA.deleted.push({
+        id: want, title: found.title,
+        at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      });
+      return Promise.resolve({ err: 'ok', data: { deleted_id: want, title: found.title } });
     }
     if (name === 'merge') {
       // 回的形状必须与 tool.MergeHandler 一致（含 moved_total / removed_ids）——

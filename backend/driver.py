@@ -256,6 +256,22 @@ def merge_group(api, source_id, target_id, delete_source=True):
             'deleted': deleted, 'notes': notes}
 
 
+def delete_book(api, book_id):
+    """删除一本书（单独删除，不与任何书合并）。
+
+    只做一件事，但单独封装的意义是：**写操作集中在 `write_ops`/`driver`**，
+    `tests/test_fake_host.py::TestWritePathGuard` 就是靠这条边界守住"引擎层不许写"。
+
+    宿主侧会连带清理关联数据——收藏 / 在读 / 阅读进度 / 时长 / 评分 / 书评 / 共读记录 /
+    书单关联，见上游 PoxenStudio/mybooks#82 的修复（commit a33f0c26 新增
+    `webserver/base/book_data_cascade.py`，工具箱路径与宿主删除路径共用它）。
+    **但那是删除不是迁移**：被删这一本上的阅读进度不会搬到同组的其它书上。
+    该修复目前只在 `develop` 线上，`v4.3.0` 尚未包含——所以界面文案写的是"会一并删除"，
+    不承诺"已经清理干净"，在旧宿主上也不会说错。
+    """
+    api.calibre.delete_book(book_id)
+
+
 # --------------------------------------------------------------------------- 落盘
 
 

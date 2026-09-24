@@ -37,7 +37,7 @@ REQUIRED = (
     'backend/__init__.py',
     'backend/tool.py',
     'backend/driver.py',
-    'backend/merge.py',
+    'backend/write_ops.py',
     # 判定引擎：漏打任何一个都会让工具在运行时 ImportError
     'backend/dedup/__init__.py',
     'backend/dedup/normalize.py',

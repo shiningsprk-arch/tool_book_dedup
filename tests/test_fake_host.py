@@ -312,11 +312,11 @@ def load_tool(tmp_root, api, shared_root=None):
     spec.loader.exec_module(package)
     driver = importlib.import_module(PKG_NAME + '.driver')
     tool = importlib.import_module(PKG_NAME + '.tool')
-    merge = importlib.import_module(PKG_NAME + '.merge')
+    write_ops = importlib.import_module(PKG_NAME + '.write_ops')
     if shared_root:
         tool.BookDedupTool.shared_work_dir = classmethod(
             lambda cls, _root=shared_root: _root)
-    return tool, driver, merge
+    return tool, driver, write_ops
 
 
 def make_books():
@@ -368,7 +368,7 @@ class TestToolWiring(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix='book_dedup_test_')
         self.shared = tempfile.mkdtemp(prefix='book_dedup_shared_')
         self.api = FakeApi(make_books())
-        self.tool, self.driver, self.merge = load_tool(self.tmp, self.api, self.shared)
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
         self.tool.BookDedupTool._last_task_id = None
         self.tool.BookDedupTool._accepted = False
 
@@ -469,7 +469,7 @@ class TestToolWiring(unittest.TestCase):
         position = 0
         keeper = report['groups'][position]['members'][0]['id']
         proxy = self.tool.BookDedupTool().api_proxy()
-        plan, error = self.merge.build_plan(
+        plan, error = self.write_ops.build_plan(
             proxy, work_dir, position, keeper_id=keeper)
         self.assertIsNone(error, error)
         self.assertTrue(plan['steps'])
@@ -569,7 +569,7 @@ class TestMerge(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix='book_dedup_merge_')
         self.shared = tempfile.mkdtemp(prefix='book_dedup_merge_shared_')
         self.api = FakeApi(make_books())
-        self.tool, self.driver, self.merge = load_tool(self.tmp, self.api, self.shared)
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
         self.tool_class = self.tool.BookDedupTool
         self.tool_class._last_task_id = None
         self.tool_class._accepted = False
@@ -586,7 +586,7 @@ class TestMerge(unittest.TestCase):
     def test_plan_lists_moved_and_dropped_formats(self):
         """预览必须分清"会被复制过去的格式"与"同格式会被丢弃的那一份"。"""
         position, group = self._group_index_of('三体')
-        plan, error = self.merge.build_plan(
+        plan, error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
         self.assertIsNone(error)
         self.assertEqual(plan['keeper_id'], 1)
@@ -598,21 +598,21 @@ class TestMerge(unittest.TestCase):
 
     def test_plan_rejects_keeper_outside_group(self):
         position, _group = self._group_index_of('三体')
-        _plan, error = self.merge.build_plan(
+        _plan, error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=5)
         self.assertIsNotNone(error)
         self.assertEqual(error['err'], 'keeper.not_in_group')
 
     def test_plan_rejects_bad_index(self):
-        _plan, error = self.merge.build_plan(self.api, self.work_dir, 999)
+        _plan, error = self.write_ops.build_plan(self.api, self.work_dir, 999)
         self.assertIsNotNone(error)
         self.assertEqual(error['err'], 'group.not_found')
 
     def test_execute_merges_formats_then_deletes_source(self):
         position, _group = self._group_index_of('三体')
-        plan, _error = self.merge.build_plan(
+        plan, _error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
-        result = self.merge.execute(self.api, self.work_dir, plan)
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
         self.assertEqual(result['err'], 'ok')
         data = result['data']
         self.assertEqual(data['removed_ids'], [2])
@@ -626,13 +626,13 @@ class TestMerge(unittest.TestCase):
     def test_execute_records_ledger_and_hides_group(self):
         """合并后这一组只剩一本 → 列表要把它摘掉，不能引导用户再点一次。"""
         position, _group = self._group_index_of('三体')
-        plan, _error = self.merge.build_plan(
+        plan, _error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
-        self.merge.execute(self.api, self.work_dir, plan)
+        self.write_ops.execute(self.api, self.work_dir, plan)
 
-        merged_ids = self.merge.read_merged_ids(self.work_dir)
+        merged_ids = self.write_ops.read_merged_ids(self.work_dir)
         self.assertEqual(merged_ids, [2])
-        titles = self.merge.read_removed_titles(self.work_dir)
+        titles = self.write_ops.read_removed_titles(self.work_dir)
         self.assertEqual(titles[0]['title'], '三体（全集）')
         self.assertEqual(titles[0]['into'], '三体')
 
@@ -643,18 +643,18 @@ class TestMerge(unittest.TestCase):
 
     def test_double_merge_is_refused(self):
         position, _group = self._group_index_of('三体')
-        plan, _error = self.merge.build_plan(
+        plan, _error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
-        self.merge.execute(self.api, self.work_dir, plan)
-        _plan2, error = self.merge.build_plan(self.api, self.work_dir, position)
+        self.write_ops.execute(self.api, self.work_dir, plan)
+        _plan2, error = self.write_ops.build_plan(self.api, self.work_dir, position)
         self.assertIsNotNone(error)
         self.assertEqual(error['err'], 'group.already_merged')
 
     def test_execute_without_delete_keeps_source(self):
         position, _group = self._group_index_of('三体')
-        plan, _error = self.merge.build_plan(
+        plan, _error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
-        result = self.merge.execute(self.api, self.work_dir, plan, delete_source=False)
+        result = self.write_ops.execute(self.api, self.work_dir, plan, delete_source=False)
         self.assertEqual(result['err'], 'ok')
         self.assertEqual(result['data']['removed_ids'], [])
         self.assertIn(2, self.api.calibre.books)          # 源记录还在
@@ -663,10 +663,10 @@ class TestMerge(unittest.TestCase):
     def test_plan_survives_no_new_formats(self):
         """两组格式完全相同时 merge_formats 会抛错，合并要照常继续（只是没复制什么）。"""
         position, _group = self._group_index_of('To Live')
-        plan, error = self.merge.build_plan(
+        plan, error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=3)
         self.assertIsNone(error)
-        result = self.merge.execute(self.api, self.work_dir, plan)
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
         self.assertEqual(result['err'], 'ok')
         self.assertEqual(result['data']['moved_total'], 0)
         # 源书仍然被删（用户要的就是"消掉这一条"），并记账为"没有新格式"
@@ -675,10 +675,123 @@ class TestMerge(unittest.TestCase):
 
     def test_merge_plan_warns_about_limitations(self):
         position, _group = self._group_index_of('三体')
-        plan, _error = self.merge.build_plan(
+        plan, _error = self.write_ops.build_plan(
             self.api, self.work_dir, position, keeper_id=1)
         self.assertIn('working_formats_dropped', plan['warnings'])
         self.assertIn('source_records_not_migrated', plan['warnings'])
+
+
+class TestDelete(unittest.TestCase):
+    """单本书删除：守门、记账、以及"删完之后列表还显示吗"。"""
+
+    def setUp(self):
+        FakeBackgroundService._tasks = {}
+        self.tmp = tempfile.mkdtemp(prefix='book_dedup_del_')
+        self.shared = tempfile.mkdtemp(prefix='book_dedup_del_shared_')
+        self.api = FakeApi(make_books())
+        self.tool, self.driver, self.write_ops = load_tool(self.tmp, self.api, self.shared)
+        self.tool_class = self.tool.BookDedupTool
+        self.tool_class._last_task_id = None
+        self.tool_class._accepted = False
+        self.built, self.work_dir = scan(self.tool, self.driver, self.api)
+
+    def _group_of(self, title):
+        report = self.driver.read_report(self.work_dir)
+        for position, group in enumerate(report['groups']):
+            for member in group['members']:
+                if member['title'] == title:
+                    return position, group
+        raise AssertionError('找不到分组：%s' % title)
+
+    def test_delete_refuses_book_outside_group(self):
+        """守门：只收分组序号 + 一个 book_id，且必须**是这一组的成员**。
+
+        不校验的话，一个构造出来的请求就能删掉没被查出来的书。
+        """
+        position, _group = self._group_of('三体')
+        result = self.write_ops.execute_delete(self.api, self.work_dir, position, 5)
+        self.assertEqual(result['err'], 'book.not_in_group')
+        self.assertIn(5, self.api.calibre.books)          # 那本书没被动
+
+    def test_delete_rejects_bad_params(self):
+        position, _group = self._group_of('三体')
+        self.assertEqual(
+            self.write_ops.execute_delete(self.api, self.work_dir, position, 'x')['err'],
+            'params.invalid')
+        self.assertEqual(
+            self.write_ops.execute_delete(self.api, self.work_dir, 'x', 1)['err'],
+            'params.invalid')
+        self.assertEqual(
+            self.write_ops.execute_delete(self.api, self.work_dir, 999, 1)['err'],
+            'group.not_found')
+
+    def test_delete_removes_book_and_records_ledger(self):
+        position, _group = self._group_of('三体')
+        result = self.write_ops.execute_delete(self.api, self.work_dir, position, 2)
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['deleted_id'], 2)
+        self.assertNotIn(2, self.api.calibre.books)
+        self.assertIn(('delete_book', 2), self.api.calibre.calls)
+
+        self.assertEqual(self.write_ops.read_deleted_ids(self.work_dir), [2])
+        titles = self.write_ops.read_deleted_titles(self.work_dir)
+        self.assertEqual(titles[0]['title'], '三体（全集）')
+        # 合并记账不该被污染
+        self.assertEqual(self.write_ops.read_merged_ids(self.work_dir), [])
+
+    def test_deleted_book_becomes_gone_for_other_operations(self):
+        """删掉之后的 id 必须进 `gone_ids`，否则拿它去合并会撞"来源书籍不存在"。"""
+        position, _group = self._group_of('三体')
+        self.write_ops.execute_delete(self.api, self.work_dir, position, 2)
+        self.assertIn(2, self.write_ops.gone_ids(self.work_dir))
+        # 这一组只剩一本 → 不再提供合并预览
+        _plan, error = self.write_ops.build_plan(self.api, self.work_dir, position)
+        self.assertIsNotNone(error)
+        self.assertEqual(error['err'], 'group.already_merged')
+
+    def test_group_with_fewer_than_two_is_dropped_from_list(self):
+        """列表要按"剩下的够不够两本"摘除，而不是按"有没有被合并过"。"""
+        position, _group = self._group_of('三体')
+        index = self.driver.read_index(self.work_dir)
+        gone = {2}
+        remaining = [g for g in index['groups']
+                     if len(set(g['members']) - gone) >= 2]
+        self.assertNotIn(position, [g['index'] for g in remaining])
+        # 「To Live / 活着」那一组（index 0）不受影响
+        self.assertIn(0, [g['index'] for g in remaining])
+        self.assertEqual(position, 1, '前提：#2 属于 index 1 那一组')
+
+    def test_delete_works_when_group_has_more_than_two(self):
+        """三本以上的组：删掉一本之后另外两本仍可合并（不该被"只剩一本"误拦）。"""
+        books = {
+            11: {'id': 11, 'title': '同一本书', 'authors': ['作者'], 'available_formats': ['EPUB'],
+                 'isbn': '', 'timestamp': '2026-01-01T00:00:00+00:00', '_paths': {}},
+            12: {'id': 12, 'title': '同一本书（全集）', 'authors': ['作者'], 'available_formats': ['PDF'],
+                 'isbn': '', 'timestamp': '2026-02-01T00:00:00+00:00', '_paths': {}},
+            13: {'id': 13, 'title': '同一本书（修订版）', 'authors': ['作者'], 'available_formats': ['MOBI'],
+                 'isbn': '', 'timestamp': '2026-03-01T00:00:00+00:00', '_paths': {}},
+        }
+        api = FakeApi(books)
+        tool, driver, write_ops = load_tool(self.tmp, api, self.shared)
+        built = driver.run_scan(api, api.calibre.all_book_ids(), threshold=0.5)
+        work_dir = tool.BookDedupTool.report_dir(88)
+        driver.write_report(work_dir, built)
+        driver.write_index(work_dir, built)
+        self.assertEqual(built['summary']['group_count'], 1)
+
+        result = write_ops.execute_delete(api, work_dir, 0, 12)
+        self.assertEqual(result['err'], 'ok')
+        plan, error = write_ops.build_plan(api, work_dir, 0, keeper_id=11)
+        self.assertIsNone(error, error)
+        self.assertEqual(sorted(plan['steps'][0]['source_id'] for _ in [0]), [13])
+
+    def test_delete_does_not_touch_other_books(self):
+        """删一本不影响同组其它书，也不影响别的组。"""
+        position, _group = self._group_of('三体')
+        before = sorted(self.api.calibre.books)
+        self.write_ops.execute_delete(self.api, self.work_dir, position, 2)
+        after = sorted(self.api.calibre.books)
+        self.assertEqual(set(before) - set(after), {2})
 
 
 class TestWritePathGuard(unittest.TestCase):
@@ -694,8 +807,13 @@ class TestWritePathGuard(unittest.TestCase):
                 if name.endswith('.py'):
                     yield os.path.join(directory, name)
 
-    def test_only_driver_and_merge_touch_write_calls(self):
-        allowed = {'merge.py', 'driver.py'}
+    def test_only_write_ops_and_driver_touch_write_calls(self):
+        """写书库的动作只许出现在 `write_ops.py`（两处写操作）与 `driver.py`（取数/落盘）。
+
+        这条边界是"引擎层不许写"的另一半。改名 `merge.py`→`write_ops.py` 时它立刻报红
+        ——放行名单必须跟着实际文件名走，不能留着一个再也不匹配的旧名字。
+        """
+        allowed = {'write_ops.py', 'driver.py'}
         offenders = {}
         for path in self._py_files():
             with open(path, 'r', encoding='utf-8') as handle:

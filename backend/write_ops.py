@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""合并的执行与记账。
+"""两处写操作（合并 / 删除）的执行与记账。
 
-这是整个工具里**唯一会写书库**的地方，所以规则写得比别处死：
+这是整个工具里**唯一会写书库**的模块，所以规则写得比别处死：
 
-1. **成员来自本次扫描，不接受前端传 id 列表。** `/merge` 只收一个分组序号，
+1. **成员来自本次扫描，不接受前端传 id 列表。** `/merge`、`/delete` 都只收一个分组序号，
    服务端自己回到那次扫描的索引里取成员——否则一个被篡改或过期的列表就能去删
    没被查出来的书。
 2. **保留项必须在成员里**，且必须是本次扫描算出的成员之一。
 3. **先预览再执行**：`build_plan()` 与 `execute()` 用同一份计划，预览里已经列明
    哪些格式会被复制、哪些同格式会被丢弃。
-4. **执行后记账**：被删掉的 id 写进 `merged.json`，列表与会话据此把它们摘掉——
-   合并是真的删记录，留在列表里会引导用户再点一次。
+4. **执行后记账**：合并掉的 id 写进 `merged.json`、单独删掉的写进 `deleted.json`，
+   列表与会话据此把它们摘掉——两种操作都是真的从书库删记录，留在列表里会引导用户再点一次。
+
+关于"被删掉的那本书里的用户数据"：宿主侧的删除会**级联清理**关联数据（收藏/在读/
+阅读进度/时长/评分/书评/共读记录/书单关联，见上游 PoxenStudio/mybooks#82 的修复
+commit a33f0c26，新增的 `webserver/base/book_data_cascade.py`）。但那是**删除不是迁移**
+——被删那一本上的进度不会搬到保留项上。界面文案必须说清这一点，不能让人以为合并会把
+阅读进度一起带过来。
 """
 import json
 import logging
@@ -21,6 +27,7 @@ from . import driver
 from .dedup import keeper as keeper_mod
 
 MERGED_FILENAME = 'merged.json'
+DELETED_FILENAME = 'deleted.json'
 
 
 def keep_rules():
@@ -84,6 +91,106 @@ def append_merged(work_dir, entry):
         return False
 
 
+# --------------------------------------------------------------------------- 删除记账
+
+
+def deleted_path(work_dir):
+    return os.path.join(work_dir, DELETED_FILENAME)
+
+
+def _read_ledger(path, what):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as err:
+        logging.warning('[book_dedup] %s ledger unreadable: %s', what, err)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def read_deleted(work_dir):
+    """读单独删除的记账（每次删除一条）。"""
+    return _read_ledger(deleted_path(work_dir), 'deleted')
+
+
+def read_deleted_ids(work_dir):
+    return [entry.get('id') for entry in read_deleted(work_dir) if entry.get('id')]
+
+
+def read_deleted_titles(work_dir):
+    """被单独删掉的书名，供"已处理"区如实交代。"""
+    return [{'id': entry.get('id'), 'title': entry.get('title') or '',
+             'at': entry.get('at') or ''} for entry in read_deleted(work_dir)]
+
+
+def append_deleted(work_dir, entry):
+    entries = read_deleted(work_dir)
+    entries.append(entry)
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        tmp = deleted_path(work_dir) + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(entries, handle, ensure_ascii=False)
+        os.replace(tmp, deleted_path(work_dir))
+        return True
+    except OSError as err:
+        logging.error('[book_dedup] deleted ledger not written: %s', err)
+        return False
+
+
+def gone_ids(work_dir):
+    """本次结果里**已经不在书库**的成员（合并掉的 + 单独删掉的）。
+
+    `/groups`、`/group`、`/merge` 三处都要用它：这些 id 已经不存在了，留在列表里会
+    引导用户再点一次，拿它们去合并还会撞上"来源书籍不存在"。
+    """
+    return set(read_merged_ids(work_dir)) | set(read_deleted_ids(work_dir))
+
+
+def execute_delete(api, work_dir, index_arg, book_id):
+    """单独删除一本重复书。**本工具的第二处写操作。**
+
+    守门与合并完全一致：只收分组序号 + 一个 book_id，且该 id 必须**是这一组当前的成员**
+    ——不接受前端传任意 id，否则一个构造出来的请求就能删掉没被查出来的书。
+
+    :return: ``{'err': 'ok', 'data': {...}}`` 或错误字典
+    """
+    # 单删用 `_group_members`（不要求至少两本）：把一组删到只剩一本或删光都合法
+    members, error = _group_members(work_dir, index_arg)
+    if error:
+        return error
+
+    try:
+        wanted = int(book_id)
+    except (TypeError, ValueError):
+        return {'err': 'params.invalid', 'msg': 'book_id 必须是整数'}
+
+    target = None
+    for member in members:
+        if member.get('id') == wanted:
+            target = member
+            break
+    if target is None:
+        return {'err': 'book.not_in_group', 'msg': '要删除的书必须是这一组里的成员'}
+
+    title = target.get('title') or ''
+    try:
+        driver.delete_book(api, wanted)
+    except Exception as err:  # noqa: BLE001
+        logging.error('[book_dedup] delete_book(%s) failed: %s', wanted, err)
+        return {'err': 'delete.failed', 'msg': '删除失败：%s' % err}
+
+    append_deleted(work_dir, {
+        'id': wanted,
+        'title': title,
+        'at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'index': int(index_arg),
+    })
+    return {'err': 'ok', 'data': {'deleted_id': wanted, 'title': title}}
+
+
 def report_signature(index):
     """这份结果的身份：生成时间 + 分组数。前端换了结果要能察觉。"""
     if not index:
@@ -113,8 +220,11 @@ def recommend_for_members(members, rule=None):
     return keeper_mod.recommend(adapted, rule=rule or 'metadata')
 
 
-def _current_members(work_dir, index_arg, merged_ids):
-    """取这一组的当前成员（报告形状），已合并掉的不算。"""
+def _group_members(work_dir, index_arg):
+    """取这一组的当前成员（报告形状），**已消失的（合并掉/单独删掉）不算**。
+
+    不做数量判断——单删一组里的最后一本也是合法操作，只有合并才要求至少剩两本。
+    """
     try:
         position = int(index_arg)
     except (TypeError, ValueError):
@@ -125,9 +235,17 @@ def _current_members(work_dir, index_arg, merged_ids):
     groups = report.get('groups') or []
     if position < 0 or position >= len(groups):
         return None, {'err': 'group.not_found', 'msg': '找不到该分组'}
-    group = groups[position]
-    members = [m for m in (group.get('members') or [])
-               if m.get('id') not in merged_ids]
+    gone = gone_ids(work_dir)
+    members = [m for m in (groups[position].get('members') or [])
+               if m.get('id') not in gone]
+    return members, None
+
+
+def _current_members(work_dir, index_arg, gone=None):
+    """取这一组的当前成员，并要求**至少两本**（合并的前提）。"""
+    members, error = _group_members(work_dir, index_arg)
+    if error:
+        return None, error
     if len(members) < 2:
         return None, {'err': 'group.already_merged',
                       'msg': '这一组已经处理过，只剩一本或没有可合并的成员'}
@@ -137,8 +255,7 @@ def _current_members(work_dir, index_arg, merged_ids):
 def build_plan(api, work_dir, index_arg, keeper_id=None, keep_rule=None,
                task_id=None):
     """合并预览：只算不写。返回 (plan, error)。"""
-    merged_ids = set(read_merged_ids(work_dir))
-    members, error = _current_members(work_dir, index_arg, merged_ids)
+    members, error = _current_members(work_dir, index_arg)
     if error:
         return None, error
 

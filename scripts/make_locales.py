@@ -118,6 +118,14 @@ ZH = {
 
     'handled.title': '本次已处理',
     'handled.item': '《{title}》已并入《{into}》',
+    'handled.deleted': '《{title}》已删除',
+    'del.button': '删除',
+    'del.title': '删除《{title}》？',
+    'del.warn': '会连带删除这本书记的收藏/在读/阅读进度/时长/评分/书评/书单归属——这些都不会搬到同组的其它书上。',
+    'del.confirm': '确认删除',
+    'del.cancel': '取消',
+    'del.applied': '已删除《{title}》',
+    'del.failed': '删除失败',
 }
 
 EN = {
@@ -228,6 +236,14 @@ EN = {
 
     'handled.title': 'Handled in this session',
     'handled.item': '《{title}》 merged into 《{into}》',
+    'handled.deleted': '《{title}》 deleted',
+    'del.button': 'Delete',
+    'del.title': 'Delete 《{title}》?',
+    'del.warn': 'This also removes the favorites, reading status, progress, duration, rating, review and booklist membership recorded on this copy — none of it moves to the other copies in the group.',
+    'del.confirm': 'Delete',
+    'del.cancel': 'Cancel',
+    'del.applied': 'Deleted 《{title}》',
+    'del.failed': 'Delete failed',
 }
 
 ZH_TW = {
@@ -338,6 +354,14 @@ ZH_TW = {
 
     'handled.title': '本次已處理',
     'handled.item': '《{title}》已併入《{into}》',
+    'handled.deleted': '《{title}》已刪除',
+    'del.button': '刪除',
+    'del.title': '刪除《{title}》？',
+    'del.warn': '會一併刪除這本書記的收藏／在讀／閱讀進度／時長／評分／書評／書單歸屬——這些都不會搬到同組的其它書上。',
+    'del.confirm': '確認刪除',
+    'del.cancel': '取消',
+    'del.applied': '已刪除《{title}》',
+    'del.failed': '刪除失敗',
 }
 
 

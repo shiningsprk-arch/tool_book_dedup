@@ -118,11 +118,13 @@
     keyword: '',
     groups: [],
     filteredTotal: 0,
-    mergedIds: [],
+    goneIds: [],
     removedTitles: [],
+    deletedTitles: [],
     active: null,        // 当前展开的分组 {index, group, keeperId}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
+    confirmDelete: null, // 正在确认删除的那本书 id（行内确认条）
     pollTimer: null,
   };
 
@@ -456,8 +458,9 @@
       var data = resp.data;
       state.groups = data.groups || [];
       state.filteredTotal = data.filtered_total || 0;
-      state.mergedIds = data.merged_ids || [];
+      state.goneIds = data.gone_ids || [];
       state.removedTitles = data.removed_titles || [];
+      state.deletedTitles = data.deleted_titles || [];
       if (data.summary) renderSummary(data.summary);
       renderList(data);
       renderHandled();
@@ -563,7 +566,8 @@
       collapseRow();
       return;
     }
-    state.plan = null;                       // 换了一组，上一组的合并预览作废
+    state.plan = null;                       // 换了一组，上一组的合并预览/删除确认都作废
+    state.confirmDelete = null;
     var cached = state.groupCache[index];
     if (cached) {
       setActive(index, cached);
@@ -596,6 +600,7 @@
   function collapseRow() {
     state.active = null;
     state.plan = null;
+    state.confirmDelete = null;
     refreshDrawer();
   }
 
@@ -604,6 +609,7 @@
     state.active.keeperId = bookId;
     // 换了保留项 → 之前生成的合并预览作废（它的 keeper_id 已经指向别的书了）
     state.plan = null;
+    state.confirmDelete = null;
     refreshDrawer();
   }
 
@@ -667,6 +673,56 @@
       state.plan = null;
       refreshDrawer();
     });
+    // 单本书删除：先就地展开确认条，再执行（不用弹层）
+    drawer.querySelectorAll('[data-del]').forEach(function (node) {
+      node.addEventListener('click', function () {
+        var id = Number(node.getAttribute('data-del'));
+        state.confirmDelete = (state.confirmDelete === id) ? null : id;
+        refreshDrawer();
+      });
+    });
+    drawer.querySelectorAll('[data-del-no]').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.confirmDelete = null;
+        refreshDrawer();
+      });
+    });
+    var delYes = drawer.querySelector('[data-del-yes]');
+    if (delYes) {
+      delYes.addEventListener('click', function () {
+        deleteBook(Number(delYes.getAttribute('data-del-yes')));
+      });
+    }
+  }
+
+  /** 删除一本重复书（第二处写操作；后端仍会校验它是不是这一组的成员）。 */
+  function deleteBook(bookId) {
+    if (!state.active) return;
+    var index = state.active.index;
+    var button = el.groups.querySelector('[data-del-yes]');
+    if (button) button.disabled = true;
+    api('delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: index, book_id: bookId }),
+    }).then(function (resp) {
+      if (!resp || resp.err !== 'ok') {
+        if (button) button.disabled = false;
+        notify((resp && resp.msg) || t('del.failed', '删除失败'), 'error');
+        return;
+      }
+      var data = resp.data || {};
+      notify(t('del.applied', '已删除《{title}》').replace('{title}', data.title || ''), 'success');
+      // 这一组的成员组成变了（可能已不足两本）→ 丢掉缓存并整表刷新，由后端决定它还显不显示
+      state.confirmDelete = null;
+      state.active = null;
+      state.plan = null;
+      delete state.groupCache[index];
+      loadGroups();
+    }).catch(function () {
+      if (button) button.disabled = false;
+      notify(t('del.failed', '删除失败'), 'error');
+    });
   }
 
   function benchBodyHtml(group, keeperId) {
@@ -692,6 +748,7 @@
 
     var cards = members.map(function (member) {
       var isKeeper = member.id === keeper;
+      var confirming = state.confirmDelete === member.id;
       return '<div class="bd-copy' + (isKeeper ? ' bd-copy-keeper' : '') + '">' +
         '<div class="bd-copy-head">' +
           '<span class="bd-copy-title">' + escapeHtml(member.title) + '</span>' +
@@ -701,6 +758,7 @@
         '<p class="bd-copy-meta">' + escapeHtml(t('bench.id', 'ID {id}').replace('{id}', member.id)) +
           ' · ' + escapeHtml(formatBytes(member.size)) + '</p>' +
         '<p class="bd-copy-formats">' + escapeHtml((member.formats || []).join('、') || '—') + '</p>' +
+        (confirming ? deleteConfirmHtml(member) : '') +
         '<div class="bd-copy-actions">' +
           '<button class="bd-btn bd-btn-small" data-jump="' + member.id + '">' +
             escapeHtml(t('bench.open', '打开书籍页')) + '</button>' +
@@ -708,6 +766,8 @@
             '" data-pick="' + member.id + '">' +
             escapeHtml(isKeeper ? t('bench.picked', '已选为保留') : t('bench.pick', '保留这本')) +
           '</button>' +
+          '<button class="bd-btn bd-btn-small bd-btn-danger" data-del="' + member.id + '">' +
+            escapeHtml(t('del.button', '删除')) + '</button>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -731,6 +791,23 @@
       if (members[i].id === bookId) return members[i].title;
     }
     return '—';
+  }
+
+  /** 单本书的删除确认条（行内，不用弹层——与 0.1.2 的"详情不许居中浮层"一致）。 */
+  function deleteConfirmHtml(member) {
+    return '<div class="bd-confirm">' +
+      '<p class="bd-confirm-title">' + escapeHtml(t('del.title', '删除《{title}》？')
+        .replace('{title}', member.title)) +
+        '<span class="bd-hint"> · ' + escapeHtml(t('bench.id', 'ID {id}').replace('{id}', member.id)) + '</span></p>' +
+      '<p class="bd-hint bd-warn-hint">' + escapeHtml(t('del.warn',
+        '会连带删除这本书记的收藏/在读/阅读进度/时长/评分/书评/书单归属——这些都**不会**搬到同组的其它书上。')) + '</p>' +
+      '<div class="bd-confirm-actions">' +
+        '<button class="bd-btn bd-btn-small bd-btn-danger" data-del-yes="' + member.id + '">' +
+          escapeHtml(t('del.confirm', '确认删除')) + '</button>' +
+        '<button class="bd-btn bd-btn-small" data-del-no="1">' +
+          escapeHtml(t('del.cancel', '取消')) + '</button>' +
+      '</div>' +
+    '</div>';
   }
 
   function diffTableHtml(diff, members, keeper) {
@@ -758,14 +835,22 @@
   }
 
   function renderHandled() {
-    var removed = state.removedTitles || [];
-    el['handled-card'].hidden = removed.length === 0;
-    if (!removed.length) return;
-    el['handled-list'].innerHTML = removed.map(function (item) {
+    var merged = state.removedTitles || [];
+    var deleted = state.deletedTitles || [];
+    var total = merged.length + deleted.length;
+    el['handled-card'].hidden = total === 0;
+    if (!total) return;
+    // 合并的与被单独删掉的分开写：两者后果不同（合并会把格式搬到保留项，纯删除不会）
+    var items = merged.map(function (item) {
       return '<li>' + escapeHtml(t('handled.item', '《{title}》已并入《{into}》')
         .replace('{title}', item.title).replace('{into}', item.into)) +
         '<span class="bd-hint"> · ' + escapeHtml(item.at || '') + '</span></li>';
-    }).join('');
+    }).concat(deleted.map(function (item) {
+      return '<li class="bd-handled-deleted">' +
+        escapeHtml(t('handled.deleted', '《{title}》已删除').replace('{title}', item.title)) +
+        '<span class="bd-hint"> · ' + escapeHtml(item.at || '') + '</span></li>';
+    }));
+    el['handled-list'].innerHTML = items.join('');
   }
 
   // ---------------------------------------------------------------- 合并预览 / 执行
