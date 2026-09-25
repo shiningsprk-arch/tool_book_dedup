@@ -22,9 +22,9 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 
 ```bash
 # Windows
-certutil -hashfile book_dedup-0.1.8.zip SHA256
+certutil -hashfile book_dedup-0.1.9.zip SHA256
 # Linux / macOS
-sha256sum book_dedup-0.1.8.zip
+sha256sum book_dedup-0.1.9.zip
 ```
 
 sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
@@ -33,7 +33,7 @@ sha256 与 Release 说明里的一致即可。**从源码重打也能得到同�
 ```bash
 git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
 cd tool_book_dedup
-python scripts/build.py            # → dist/book_dedup-0.1.8.zip，并打印 sha256
+python scripts/build.py            # → dist/book_dedup-0.1.9.zip，并打印 sha256
 ```
 
 ## 怎么用
@@ -272,5 +272,6 @@ frontend/            自包含静态页（无构建步骤）
 ## 出处
 
 判定思路参考 [BookOrbit](https://github.com/bookorbit/bookorbit)（AGPL-3.0）的重复检测模块。
-**本工具是独立实现，不含其任何代码、权重表或停用词表** —— 逐条说明见 `backend/NOTICE`，
-因此不引入 AGPL 义务。
+**本工具是独立实现，不含其任何代码、权重表或停用词表**；唯一的重合是媒体家族格式清单
+（"扩展名 → 媒体类型"的功能性事实清单，与它的 `mediaFamilyForFormat` 一致）——
+逐条说明见 `backend/NOTICE`，因此不引入 AGPL 义务。

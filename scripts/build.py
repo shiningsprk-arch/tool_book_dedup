@@ -162,7 +162,7 @@ def iter_payload():
             dirnames[:] = sorted(d for d in dirnames
                                  if d not in EXCLUDE_DIRS and d != '__pycache__')
             for filename in sorted(filenames):
-                if filename.endswith(('.pyc', '.pyo', '.pyo')):
+                if filename.endswith(('.pyc', '.pyo')):
                     continue
                 disk = os.path.join(dirpath, filename)
                 relative = os.path.relpath(disk, REPO_ROOT).replace(os.sep, '/')

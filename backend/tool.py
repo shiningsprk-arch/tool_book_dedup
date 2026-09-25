@@ -80,9 +80,9 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.8',
+            'revision': '0.1.9',
             'author': '黏菌',
-            'publish_date': '2026-09-23',
+            'publish_date': '2026-09-25',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
         }
 
@@ -108,7 +108,10 @@ class BookDedupTool(BaseTool):
     def is_running(cls) -> bool:
         if cls._accepted:
             return True
-        _lock = getattr(BackgroundService, 'lock', None)
+        # 真宿主的锁叫 `_lock`（background_service.py 的类属性）；假宿主必须同名字段，
+        # 否则这条带锁分支在测试里活着、在真机上却是死代码（0.1.9 review 发现的笔误）。
+        # tests/test_fake_host.py 的 TestRealHostWiring 把两侧钉在一起。
+        _lock = getattr(BackgroundService, '_lock', None)
         if _lock is not None:
             with _lock:
                 return cls._task_status() == _STATUS_RUNNING
@@ -316,7 +319,11 @@ class StartHandler(BaseHandler):
             return {'err': 'params.invalid', 'msg': _('请求体不是合法 JSON')}
 
         book_ids = payload.get('book_ids') or []
-        if not isinstance(book_ids, list) or any(not isinstance(i, int) for i in book_ids):
+        # bool 是 int 的子类（JSON `true` 会通过 isinstance(i, int)），必须先排除——
+        # 否则 `{"book_ids": [true]}` 会被当成 id=1 去扫书库。与 write_ops._parse_ids
+        # 对 bool 的特判保持同一口径。
+        if not isinstance(book_ids, list) or any(
+                isinstance(i, bool) or not isinstance(i, int) for i in book_ids):
             return {'err': 'params.invalid', 'msg': _('book_ids 必须是整数数组')}
         # 空列表 = 整个书库。展开走带装饰器的方法（前端不该把几万个 id 传一圈回来）。
         try:

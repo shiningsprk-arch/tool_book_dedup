@@ -67,6 +67,10 @@
       }).then(function (data) {
         DICT = flatten(data);
         applyI18n();
+        // <html lang> 要跟着实际加载的语言走（index.html 里写死的是 zh）：
+        // zh-TW/en 下读屏与断行都依赖它。用真正加载成功的 next，而不是请求的 code——
+        // zh-TW 缺包时会退到 zh，这时 lang 也该如实标 zh。
+        document.documentElement.lang = next;
         // 动态内容（分组行/对照表/弹层/汇总）跟着重画一次，否则会一直留着兜底文案
         try { rerender(); } catch (err) { /* 重画失败不该影响语言切换本身 */ }
       }).catch(tryNext);

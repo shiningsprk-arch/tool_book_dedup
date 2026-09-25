@@ -609,6 +609,18 @@ def _execute(api, work_dir, plan, delete_source=True):
                 removed.append({'id': source_id, 'title': step.get('source_title') or ''})
         results.append(entry)
 
+    # 全部步骤都败在"源已不在书库"= 这一组其实已经被处理过了。顺序的二次合并走不到
+    # 执行阶段（build_plan 的 group.already_merged 先拦）；能落到这里的只有并发窗口——
+    # 两次 /merge 都赶在第一次落账前通过了 build_plan，第二次执行时成员已全被第一次并掉。
+    # 这时别报 merge.failed 吓用户，也别往台账再记一笔噪音（第一次的 entry 已记了真账）。
+    failed = [r for r in results if r.get('error')]
+    if failed and len(failed) == len(results) and \
+            all(r.get('error') == 'merge.source_missing' for r in failed):
+        return {'err': 'group.already_merged',
+                'msg': '这一组已经处理过：要合并的成员已不在书库',
+                'data': {'keeper_id': keeper_id, 'removed_ids': [],
+                         'steps': results, 'failed': len(failed)}}
+
     entry = {
         'at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'index': plan.get('index'),
@@ -624,7 +636,6 @@ def _execute(api, work_dir, plan, delete_source=True):
     }
     append_merged(work_dir, entry)
 
-    failed = [r for r in results if r.get('error')]
     kept = plan.get('kept') or []
     data = {
         'keeper_id': keeper_id,

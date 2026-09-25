@@ -17,6 +17,7 @@ import importlib.util
 import io as _io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -50,7 +51,11 @@ class FakeTask(object):
 
 class FakeBackgroundService(object):
     _tasks = {}
-    lock = __import__('threading').RLock()
+    # 名字必须与真宿主一致：background_service.py:67 的类属性叫 `_lock`（私有）。
+    # 以前这里叫公开的 `lock`，把 tool.py 里 `getattr(BackgroundService, '_lock', None)`
+    # 的笔误（原来写成 'lock'）遮成了"测试全绿、真机死代码"——0.1.9 改正并加了
+    # TestRealHostWiring 钉住两侧。
+    _lock = __import__('threading').RLock()
     STATUS_RUNNING = 'running'
     STATUS_COMPLETED = 'completed'
     STATUS_FAILED = 'failed'
@@ -894,6 +899,29 @@ class TestMerge(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertEqual(error['err'], 'group.already_merged')
 
+    def test_concurrent_double_merge_says_already_done(self):
+        """**回归（0.1.9 review P7-4）**：并发窗口里的第二次 /merge 要回"已处理"。
+
+        顺序的二次合并走不到执行阶段（build_plan 的 group.already_merged 先拦，
+        见 test_double_merge_is_refused）；但两次请求都赶在第一次落账**前**通过了
+        build_plan 时，第二次 execute 看到的是"成员全没了"——以前这条回
+        merge.failed + source_missing，像出了故障。现在回 group.already_merged
+        （与顺序二次合并同一口径），且不往台账里再记一笔噪音。
+        """
+        position, _group = self._group_index_of('三体')
+        plan, _error = self.write_ops.build_plan(
+            self.api, self.work_dir, position, keeper_id=1)
+        self.assertEqual(self.write_ops.execute(self.api, self.work_dir, plan)['err'], 'ok')
+        # 第二次请求此时才执行：计划是成员还在时算好的，成员已被第一次并掉
+        result = self.write_ops.execute(self.api, self.work_dir, plan)
+        self.assertEqual(result['err'], 'group.already_merged')
+        self.assertIn('已经处理过', result['msg'])
+        # 台账里只有第一笔真账；第二次的空转不许留痕（否则「本次已处理」会多出
+        # 一串"未处理：这本书已不在书库"的假失败）
+        ledger = self.write_ops.read_merged(self.work_dir)
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]['removed_ids'], [2])
+
     def test_execute_without_delete_keeps_source(self):
         position, _group = self._group_index_of('三体')
         plan, _error = self.write_ops.build_plan(
@@ -1600,6 +1628,15 @@ class TestHandlers(unittest.TestCase):
                           body={'index': position, 'ids': [member_ids[0]]})
         self.assertEqual(error['err'], 'params.invalid')
 
+    def test_start_rejects_bool_book_ids(self):
+        """**回归（0.1.9 review P6）**：JSON `true` 会通过 isinstance(i, int)
+        （bool 是 int 的子类），`{"book_ids": [true]}` 以前被当成 id=1 去扫书库。
+        与 write_ops._parse_ids 的 bool 特判对齐同一口径。"""
+        result = self.call(self.tool.StartHandler, body={'book_ids': [True]})
+        self.assertEqual(result['err'], 'params.invalid')
+        result = self.call(self.tool.StartHandler, body={'book_ids': [1, True]})
+        self.assertEqual(result['err'], 'params.invalid')
+
     def test_merge_handler_runs_the_write_path(self):
         """写路径走 handler（而不是直接调 write_ops）也要通。"""
         position = 0
@@ -1883,6 +1920,54 @@ class TestWritePathGuard(unittest.TestCase):
             for call in self.WRITE_CALLS:
                 self.assertNotIn('.%s(' % call, text,
                                  '引擎里出现了写操作：%s -> %s' % (name, call))
+
+
+class TestRealHostWiring(unittest.TestCase):
+    """真宿主接线：把 tool.py 探测的锁名与**真的** background_service.py 钉在一起。
+
+    0.1.9 review 发现 tool.py 曾用 `getattr(BackgroundService, 'lock', None)` 探测锁，
+    而真宿主的类属性叫 `_lock`——笔误让带锁分支在真机上从未执行过，而假宿主恰好定义了
+    公开名 `lock`，离线测试全绿也看不出来。两层防护：
+
+    - `test_tool_probes_the_private_lock_name`：读 tool.py 源码核对探测名，**离线也会跑**
+      （假宿主改名后，探测名再写岔只会让分支静默退化，其他用例测不出来）；
+    - `test_real_host_has_private_lock`：加载真的 background_service.py（只依赖标准库，
+      可独立 import）确认 `_lock` 确实存在——要求 clone 在 `../mybooks源码/mybooks-v4.2.1`，
+      找不到就 skip（与 `_load_real_core_api` 同一约定）。
+    """
+
+    REAL_SERVICE = None
+
+    @classmethod
+    def setUpClass(cls):
+        clone = os.path.abspath(os.path.join(ROOT, '..', 'mybooks源码', 'mybooks-v4.2.1'))
+        path = os.path.join(clone, 'webserver', 'services', 'background_service.py')
+        if not os.path.exists(path):
+            return
+        spec = importlib.util.spec_from_file_location(
+            'real_background_service_under_test', path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as err:  # noqa: BLE001
+            print('[harness] 真 background_service 加载失败：%s: %s'
+                  % (type(err).__name__, err))
+            return
+        cls.REAL_SERVICE = getattr(module, 'BackgroundService', None)
+
+    def test_tool_probes_the_private_lock_name(self):
+        with open(os.path.join(BACKEND, 'tool.py'), 'r', encoding='utf-8') as handle:
+            source = handle.read()
+        match = re.search(r"getattr\(BackgroundService,\s*'([^']+)'", source)
+        self.assertIsNotNone(match, 'tool.py 里找不到 getattr(BackgroundService, ...) 探测')
+        self.assertEqual(match.group(1), '_lock')
+
+    def test_real_host_has_private_lock(self):
+        if self.REAL_SERVICE is None:
+            self.skipTest('找不到 mybooks clone（../mybooks源码/mybooks-v4.2.1），无法核对真宿主')
+        self.assertIsNotNone(
+            getattr(self.REAL_SERVICE, '_lock', None),
+            '真宿主 BackgroundService 没有 _lock：tool.py 的带锁分支会退化成无锁读')
 
 
 if __name__ == '__main__':

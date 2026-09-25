@@ -1,5 +1,5 @@
 {
-  "app.footer": "查重判定為 clean-room 實作，設計思路參考 BookOrbit（AGPL-3.0）；判定規則與權重依 MyBooks 口徑重做。",
+  "app.footer": "查重實作參考了 BookOrbit（AGPL-3.0）的設計思路與媒體家族格式清單，其餘為本工具獨立實作，詳見 NOTICE。",
   "app.title": "查重合併",
   "bench.collapse": "收合",
   "bench.failed": "讀取分組失敗",

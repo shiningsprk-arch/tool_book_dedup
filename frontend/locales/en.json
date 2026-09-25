@@ -1,5 +1,5 @@
 {
-  "app.footer": "Duplicate detection is a clean-room implementation; the design approach references BookOrbit (AGPL-3.0), with rules and weights redone for MyBooks.",
+  "app.footer": "Implementation references BookOrbit (AGPL-3.0) for its design approach and media-family format lists; everything else is this repository's own work — see NOTICE.",
   "app.title": "Duplicate Finder",
   "bench.collapse": "Collapse",
   "bench.failed": "Could not read the group",

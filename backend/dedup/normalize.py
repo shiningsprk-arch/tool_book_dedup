@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """归一化：把"同一本书的两种写法"压成同一个 key。
 
-设计来源是 BookOrbit 的 `book-duplicate-normalize.ts`（AGPL），**本文件是 clean-room
-重写**：只借它"ISBN 互换 + 媒体家族"这两个判定思路，实现、命名与全部判定细节按 MyBooks
-自己的数据形态重做（中文标点、全角字符、Calibre 字段口径）。
+设计来源是 BookOrbit 的 `book-duplicate-normalize.ts`（AGPL）。本文件的实现为独立
+编写，判定细节按 MyBooks 自己的数据形态重做（中文标点、全角字符、Calibre 字段口径）；
+唯一的例外是下方三组媒体家族格式清单与它的 `mediaFamilyForFormat` 一致——那是"扩展名
+→ 媒体类型"的功能性事实清单，不受著作权保护，来龙去脉与依据见 backend/NOTICE。
 
 为什么 ISBN 要归一到 13 位：同一本书的新老书号（ISBN-10 与 ISBN-13）是不同的字符串，
 不换算就永远对不上，而换算之后它们是同一个 key。
@@ -18,8 +19,8 @@ except ImportError:  # 离线测试（引擎不应依赖宿主）
         return s
 
 # 媒体家族：只有同一家族内才互为重复（同一本书的 epub 与 mp3 不是重复）。
-# MyBooks 的入库格式见 BaseTool.SUPPORTED_FORMATS，有声书/漫画目前不入库，
-# 但保留这两组是为了将来接上时不必改判定结构。
+# 有声书/漫画两组与 BookOrbit 的 mediaFamilyForFormat 一致（宿主目前不入库这两类，
+# 保留是为了将来接上时不必改判定结构）；清单的来源与依据见 backend/NOTICE。
 _AUDIOBOOK_FORMATS = frozenset(['m4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac'])
 _COMIC_FORMATS = frozenset(['cbz', 'cbr', 'cb7', 'cbx'])
 _EBOOK_FORMATS = frozenset(['epub', 'pdf', 'mobi', 'azw', 'azw3', 'fb2', 'kepub', 'txt', 'docx'])

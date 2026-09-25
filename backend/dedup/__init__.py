@@ -13,9 +13,10 @@
     report      报告形状 / 汇总 / 筛选
     ignore      忽略名单（"这几本不是重复"）：配对键、指纹、配对过滤
 
-设计对照 BookOrbit 的 `book-duplicates` 模块（AGPL-3.0），**全部 clean-room 重写**：
-借的是判定思路与结构（理由枚举、字段折叠、两档证据、误报记忆），不复制其代码、
-不照抄其权重表与停用词表。
+设计对照 BookOrbit 的 `book-duplicates` 模块（AGPL-3.0）：借的是判定思路与结构
+（理由枚举、字段折叠、两档证据、误报记忆），不复制其代码、不照抄其权重表与停用词表。
+唯一的重合是 normalize 里的媒体家族格式清单（功能性事实清单，与它的
+`mediaFamilyForFormat` 一致）——来源与依据见 backend/NOTICE。
 """
 
 from . import cluster, diff, ignore, keeper, metadata, normalize, report, similarity

@@ -2,7 +2,8 @@
 """生成三语 locales —— 文案集中在这里，避免手写 JSON 漏键。
 
 前端用扁平点号键（脚手架 i18n 直查），所以脚本产出就是扁平表；
-`scripts/check_locales.py` 会与前端实际引用的键做对账。
+`tests/test_frontend_contract.py` 会与前端实际引用的键做对账（翻译缺口、
+未使用键、占位符一致性都在那边守门）。
 """
 import json
 import os
@@ -12,7 +13,7 @@ LOCALES = os.path.join(HERE, '..', 'frontend', 'locales')
 
 ZH = {
     'app.title': '查重合并',
-    'app.footer': '查重判定为 clean-room 实现，设计思路参考 BookOrbit（AGPL-3.0）；判定规则与权重按 MyBooks 口径重做。',
+    'app.footer': '查重实现参考了 BookOrbit（AGPL-3.0）的设计思路与媒体家族格式清单，其余为本仓独立实现，详见 NOTICE。',
 
     'scope.title': '查重范围',
     'scope.loading': '正在读取书库信息…',
@@ -193,7 +194,7 @@ ZH = {
 
 EN = {
     'app.title': 'Duplicate Finder',
-    'app.footer': 'Duplicate detection is a clean-room implementation; the design approach references BookOrbit (AGPL-3.0), with rules and weights redone for MyBooks.',
+    'app.footer': "Implementation references BookOrbit (AGPL-3.0) for its design approach and media-family format lists; everything else is this repository's own work — see NOTICE.",
 
     'scope.title': 'Scope',
     'scope.loading': 'Reading library information…',
@@ -374,7 +375,7 @@ EN = {
 
 ZH_TW = {
     'app.title': '查重合併',
-    'app.footer': '查重判定為 clean-room 實作，設計思路參考 BookOrbit（AGPL-3.0）；判定規則與權重依 MyBooks 口徑重做。',
+    'app.footer': '查重實作參考了 BookOrbit（AGPL-3.0）的設計思路與媒體家族格式清單，其餘為本工具獨立實作，詳見 NOTICE。',
 
     'scope.title': '查重範圍',
     'scope.loading': '正在讀取書庫資訊…',
