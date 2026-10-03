@@ -25,8 +25,8 @@ BookOrbit 项目的重复检测模块（https://github.com/bookorbit/bookorbit �
   · 中文文本处理（字符 bigram、变体判定、尾部注记剥离）为本仓自定，BookOrbit 无对应实现
 
 结论：本工具不含 BookOrbit 受著作权保护的表达——代码未复制，唯一的重合是上面那份
-不受保护的功能性事实清单——因此**不构成演绎作品，不引入 AGPL 义务**。
-LICENSE 为本工具的授权（与 MyBooks 宿主一致的 BSD-2-Clause）。
+不受保护的功能性事实清单——因此**不构成演绎作品，不引入 BookOrbit 的 AGPL 义务**。
+LICENSE 为本工具的授权（AGPL-3.0；2026-10-03 之前的版本为 BSD-2-Clause）。
 
 ---
 
@@ -65,5 +65,5 @@ What was NOT copied:
 
 Conclusion: this tool contains no protectable expression from BookOrbit — no code
 was copied, and the only overlap is the unprotectable functional fact list above —
-so it is **not a derivative work and carries no AGPL obligation**. The LICENSE here
-is this tool's own (BSD-2-Clause, matching the MyBooks host).
+so it is **not a derivative work and carries no AGPL obligation from BookOrbit**. The LICENSE here
+is this tool's own (AGPL-3.0; versions before 2026-10-03 were BSD-2-Clause).

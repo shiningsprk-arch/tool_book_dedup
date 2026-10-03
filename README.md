@@ -6,7 +6,7 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 - 工具 ID：`book_dedup`
 - 形态：外置工具包（`manifest.json` + `backend/` + `frontend/` + `icon.png`），用 `mytool` 打包
 - CoreAPI：`1.3.0`
-- 授权：BSD-2-Clause（判定思路参考 BookOrbit，**未使用其代码** —— 见 `backend/NOTICE`）
+- 授权：AGPL-3.0（判定思路参考 BookOrbit，**未使用其代码** —— 见 `backend/NOTICE`）
 
 ## 安装
 
