@@ -2,7 +2,8 @@
 """打包查重合并工具为可直接上传的 zip。
 
 宿主只读归档根目录，因此 zip 里必须是 `manifest.json` + `backend/` + `frontend/` + `icon.png`
-（外加 LICENSE 与 backend/NOTICE），不能套一层文件夹。
+（外加 backend/NOTICE），不能套一层文件夹。LICENSE 全文**不进包**（0.1.10 起）：仓库根保留
+LICENSE 供 GitHub 识别与源码分发，随包的授权声明在 `backend/NOTICE`。
 
 为什么自己打包而不是调 `mytool build`：离线可复现、无需 npm，并且顺带做一轮产物形状校验
 （混进字节码、缺文件、manifest 指向不存在的模块，都在构建期就报错，而不是装完才发现）。
@@ -26,11 +27,10 @@ import zipfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 归档根的允许条目（多一层或少一层都会被宿主判为非法包）
-ROOT_ENTRIES = {'manifest.json', 'icon.png', 'LICENSE', 'backend', 'frontend'}
+ROOT_ENTRIES = {'manifest.json', 'icon.png', 'backend', 'frontend'}
 REQUIRED = (
     'manifest.json',
     'icon.png',
-    'LICENSE',
     # 出处与未使用声明：放 backend/ 里以保持顶层包形状不变
     'backend/NOTICE',
     'backend/__init__.py',
@@ -152,7 +152,7 @@ def iter_payload():
             continue
         full = os.path.join(REPO_ROOT, name)
         if os.path.isfile(full):
-            if name in ROOT_ENTRIES or name == 'LICENSE':
+            if name in ROOT_ENTRIES:
                 yield name, full
             continue
         # 目录：只收 backend / frontend
@@ -222,7 +222,7 @@ def validate_archive(archive, manifest):
             top = name.split('/')[0]
             if '/' in name and top not in ('backend', 'frontend'):
                 problems.append('多余的顶层目录：%s' % name)
-            if '/' not in name and name not in ROOT_ENTRIES and name != 'LICENSE':
+            if '/' not in name and name not in ROOT_ENTRIES:
                 problems.append('多余的顶层文件：%s' % name)
         for relative in REQUIRED:
             if relative not in names:
