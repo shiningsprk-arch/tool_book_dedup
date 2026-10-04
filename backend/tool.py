@@ -80,9 +80,9 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.9',
+            'revision': '0.1.10',
             'author': '黏菌',
-            'publish_date': '2026-09-25',
+            'publish_date': '2026-10-04',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
         }
 

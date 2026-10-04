@@ -24,7 +24,9 @@ from .dedup import cluster, ignore as ignore_mod, keeper, metadata, report
 BATCH_SIZE = 500
 
 # 扫描上限：查重是逐本读元数据 + 两两比较，误点全库要能收住。
-MAX_BOOKS = 60000
+# 1000 万只是形式上的保险丝，实际是"不设上限"——真正的护栏是作者桶上限
+# （`dedup/cluster.DEFAULT_MAX_BUCKET`）与分批读库。
+MAX_BOOKS = 10_000_000
 
 # 相似度阈值：本期按 85% 上线（BookOrbit 同值），原值会写进报告便于按真实误报标定。
 DEFAULT_THRESHOLD = 0.85

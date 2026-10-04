@@ -270,7 +270,7 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
     if (name === 'scope') {
       return Promise.resolve({ err: 'ok', data: {
         total_books: DATA.index.scanned_books,
-        max_books: 60000,
+        max_books: 10000000,
         threshold: DATA.index.threshold,
         threshold_range: [0.5, 1.0],
         confidence: ['strong', 'likely', 'weak'],
