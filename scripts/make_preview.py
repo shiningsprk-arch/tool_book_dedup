@@ -450,19 +450,25 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       return Promise.resolve({ err: 'ok', data: { deleted_id: want, title: found.title } });
     }
     if (name === 'ignored') {
+      var rows = DATA.ignored.map(function (pair) {
+        var titles = {};
+        (DATA.report.groups || []).forEach(function (group) {
+          (group.members || []).forEach(function (m) { titles[m.id] = m.title; });
+        });
+        return {
+          a: pair[0], b: pair[1],
+          a_title: titles[pair[0]] || ('#' + pair[0]),
+          b_title: titles[pair[1]] || ('#' + pair[1]),
+          at: pair[2] || '',
+        };
+      });
+      // 与 tool.IgnoredHandler 同口径：服务端分页（0.1.11 起）
+      var ignSize = parseInt(params.size || '50', 10);
+      var ignPage = parseInt(params.page || '0', 10);
       return Promise.resolve({ err: 'ok', data: {
-        ignored: DATA.ignored.map(function (pair) {
-          var titles = {};
-          (DATA.report.groups || []).forEach(function (group) {
-            (group.members || []).forEach(function (m) { titles[m.id] = m.title; });
-          });
-          return {
-            a: pair[0], b: pair[1],
-            a_title: titles[pair[0]] || ('#' + pair[0]),
-            b_title: titles[pair[1]] || ('#' + pair[1]),
-            at: pair[2] || '',
-          };
-        }),
+        ignored: rows.slice(ignPage * ignSize, ignPage * ignSize + ignSize),
+        filtered_total: rows.length,
+        page: ignPage,
       } });
     }
     if (name === 'ignore') {

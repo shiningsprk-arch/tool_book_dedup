@@ -1616,6 +1616,47 @@ class TestHandlers(unittest.TestCase):
         rows = self.call(self.tool.GroupsHandler)['data']['groups']
         self.assertIn(position, [row['index'] for row in rows])
 
+    def _seed_ignored_trio(self):
+        """给忽略名单种三对（一组三本两两配对），返回三对规范键。"""
+        added = self.write_ops.add_ignored(self.shared, [
+            {'id': 901, 'title': '甲', 'authors': ['A'], 'size': 1024},
+            {'id': 902, 'title': '乙', 'authors': ['B'], 'size': 2048},
+            {'id': 903, 'title': '丙', 'authors': ['C'], 'size': 3072},
+        ])
+        self.assertEqual(added, 3)                     # 三本一组 = 三对
+        return [(901, 902), (901, 903), (902, 903)]
+
+    def test_ignored_handler_paginates(self):
+        """**0.1.11**：已忽略列表分页（与 /groups 同口径：page/size + filtered_total）。
+
+        界面把全部配对一次列完会太长，卡片改为服务端分页；两页拼起来必须不重不漏。
+        """
+        self._seed_ignored_trio()
+        first = self.call(self.tool.IgnoredHandler,
+                          args={'page': '0', 'size': '2'})['data']
+        self.assertEqual(first['filtered_total'], 3)
+        self.assertEqual(first['page'], 0)
+        self.assertEqual(len(first['ignored']), 2)
+        for row in first['ignored']:
+            self.assertTrue(row['a_title'] and row['b_title'])
+
+        second = self.call(self.tool.IgnoredHandler,
+                           args={'page': '1', 'size': '2'})['data']
+        self.assertEqual(len(second['ignored']), 1)
+        keys = [(row['a'], row['b'])
+                for row in first['ignored'] + second['ignored']]
+        self.assertEqual(sorted(keys), [(901, 902), (901, 903), (902, 903)])
+
+    def test_unignore_handler_removes_multiple_pairs(self):
+        """**0.1.11**：一次请求撤销多对（「撤销选中」走的就是这条批量路径）；
+        名单里没有的配对只是不计入，不报错。"""
+        self._seed_ignored_trio()
+        undone = self.call(self.tool.UnignoreHandler,
+                           body={'pairs': [[901, 902], [901, 903], [555, 556]]})
+        self.assertEqual(undone['data']['removed'], 2)
+        listed = self.call(self.tool.IgnoredHandler)['data']['ignored']
+        self.assertEqual([(row['a'], row['b']) for row in listed], [(902, 903)])
+
     def test_ignore_handler_rejects_foreign_ids(self):
         """白名单是"少报"：构造出来的请求不许把任意两本写进去。"""
         position = 0

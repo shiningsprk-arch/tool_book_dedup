@@ -126,7 +126,11 @@
     removedTitles: [],
     deletedTitles: [],
     failedTitles: [],
-    ignored: [],         // 已忽略的配对（不是重复）——可撤销
+    ignored: [],         // 已忽略的配对（不是重复）——本页（服务端分页）
+    ignoredTotal: 0,     // 忽略名单总条数（卡片标题与分页器用）
+    ignoredPage: 0,
+    ignoredPageSize: 50,
+    ignoredPicked: {},   // 已勾选的配对键 "a,b"（跨页保留，撤销成功后清空）
     active: null,        // 当前展开的分组 {index, group, keeperId, selected}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
@@ -144,6 +148,9 @@
       'list-meta', 'groups', 'pager', 'pager-label', 'btn-prev', 'btn-next',
       'empty-state', 'handled-card', 'handled-list', 'toasts',
       'ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
+      'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
+      'btn-ignored-next', 'btn-unignore-selected', 'ignored-pick-all',
+      'ignored-picked-count',
     ].forEach(function (id) {
       el[id] = document.getElementById(id);
     });
@@ -264,12 +271,25 @@
       var maxPage = Math.ceil(state.filteredTotal / state.pageSize) - 1;
       if (state.page < maxPage) { state.page += 1; loadGroups(); }
     });
+    el['btn-ignored-prev'].addEventListener('click', function () {
+      if (state.ignoredPage > 0) { state.ignoredPage -= 1; loadIgnored(); }
+    });
+    el['btn-ignored-next'].addEventListener('click', function () {
+      var maxPage = Math.ceil(state.ignoredTotal / state.ignoredPageSize) - 1;
+      if (state.ignoredPage < maxPage) { state.ignoredPage += 1; loadIgnored(); }
+    });
     // ESC 收起当前展开的那一行（没有浮层可关了）
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape' && state.active) collapseRow();
     });
 
     el['btn-unignore-all'].addEventListener('click', function () { unignore(null, true); });
+    el['btn-unignore-selected'].addEventListener('click', function () {
+      unignore(pickedIgnoredPairs());
+    });
+    el['ignored-pick-all'].addEventListener('change', function () {
+      pickAllOnPage(this.checked);
+    });
 
     loadScope();
     loadIgnored();
@@ -1304,25 +1324,53 @@
     });
   }
 
+  function ignoredPairKey(a, b) {
+    return a + ',' + b;
+  }
+
+  /** 已勾选的配对（跨页合集）——「撤销选中」发这些。 */
+  function pickedIgnoredPairs() {
+    return Object.keys(state.ignoredPicked).map(function (key) {
+      var parts = key.split(',');
+      return [Number(parts[0]), Number(parts[1])];
+    });
+  }
+
   function loadIgnored() {
-    api('ignored').then(function (resp) {
-      if (!resp || resp.err !== 'ok') return;      // 读不到就不显示这张卡，不打扰
-      state.ignored = (resp.data || {}).ignored || [];
-      renderIgnored();
-    }).catch(function () { /* 忽略名单读不到不该影响主流程 */ });
+    api('ignored?page=' + state.ignoredPage + '&size=' + state.ignoredPageSize)
+      .then(function (resp) {
+        if (!resp || resp.err !== 'ok') return;    // 读不到就不显示这张卡，不打扰
+        var data = resp.data || {};
+        state.ignored = data.ignored || [];
+        state.ignoredTotal = data.filtered_total || 0;
+        // 撤销之后名单会变短：页码越界就回夹到最后一页重取（只多跑一次请求）
+        var maxPage = Math.max(0, Math.ceil(state.ignoredTotal / state.ignoredPageSize) - 1);
+        if (state.ignoredPage > maxPage) {
+          state.ignoredPage = maxPage;
+          loadIgnored();
+          return;
+        }
+        renderIgnored();
+      }).catch(function () { /* 忽略名单读不到不该影响主流程 */ });
   }
 
   function renderIgnored() {
     var rows = state.ignored || [];
-    el['ignored-card'].hidden = rows.length === 0;
-    if (!rows.length) return;
-    el['ignored-count'].textContent = t('ignore.count', '{n} 对').replace('{n}', rows.length);
+    var total = state.ignoredTotal || 0;
+    el['ignored-card'].hidden = total === 0;
+    if (!total) return;
+    el['ignored-count'].textContent = t('ignore.count', '{n} 对').replace('{n}', total);
     el['ignored-list'].innerHTML = rows.map(function (row) {
+      var key = ignoredPairKey(row.a, row.b);
       return '<li>' +
+        '<label class="bd-ignored-pick">' +
+          '<input type="checkbox" data-pick="' + key + '"' +
+            (state.ignoredPicked[key] ? ' checked' : '') + '>' +
+        '</label>' +
         escapeHtml(t('ignore.item', '《{a}》 ↔ 《{b}》')
           .replace('{a}', row.a_title).replace('{b}', row.b_title)) +
         '<span class="bd-hint"> · ' + escapeHtml(row.at || '') + '</span>' +
-        '<button class="bd-btn bd-btn-small" data-unignore="' + row.a + ',' + row.b + '">' +
+        '<button class="bd-btn bd-btn-small" data-unignore="' + key + '">' +
           escapeHtml(t('ignore.undo', '撤销')) + '</button>' +
       '</li>';
     }).join('');
@@ -1332,11 +1380,54 @@
         unignore([[Number(parts[0]), Number(parts[1])]]);
       });
     });
+    el['ignored-list'].querySelectorAll('[data-pick]').forEach(function (node) {
+      node.addEventListener('change', function () {
+        var key = node.getAttribute('data-pick');
+        if (node.checked) state.ignoredPicked[key] = true;
+        else delete state.ignoredPicked[key];
+        updateIgnoredPickBar();
+      });
+    });
+
+    var maxPage = Math.max(0, Math.ceil(total / state.ignoredPageSize) - 1);
+    el['ignored-pager'].hidden = total <= state.ignoredPageSize;
+    el['ignored-pager-label'].textContent = (state.ignoredPage + 1) + ' / ' + (maxPage + 1);
+    el['btn-ignored-prev'].disabled = state.ignoredPage === 0;
+    el['btn-ignored-next'].disabled = state.ignoredPage >= maxPage;
+
+    updateIgnoredPickBar();
+  }
+
+  /** 勾选工具条：全选框的选中/半选、已选计数、「撤销选中」的可用性。 */
+  function updateIgnoredPickBar() {
+    var rows = state.ignored || [];
+    var onPage = rows.filter(function (row) {
+      return state.ignoredPicked[ignoredPairKey(row.a, row.b)];
+    }).length;
+    el['ignored-pick-all'].checked = rows.length > 0 && onPage === rows.length;
+    el['ignored-pick-all'].indeterminate = onPage > 0 && onPage < rows.length;
+    var picked = Object.keys(state.ignoredPicked).length;
+    el['ignored-picked-count'].textContent = picked
+      ? t('ignore.pickedCount', '已选 {n} 对').replace('{n}', picked)
+      : '';
+    el['btn-unignore-selected'].disabled = picked === 0;
+  }
+
+  /** 全选/全不选**当前分页**；其它页已勾的保持不动。 */
+  function pickAllOnPage(checked) {
+    (state.ignored || []).forEach(function (row) {
+      var key = ignoredPairKey(row.a, row.b);
+      if (checked) state.ignoredPicked[key] = true;
+      else delete state.ignoredPicked[key];
+    });
+    renderIgnored();
   }
 
   function unignore(pairs, all) {
     var button = el['btn-unignore-all'];
+    var selected = el['btn-unignore-selected'];
     if (button) button.disabled = true;
+    if (selected) selected.disabled = true;
     api('unignore', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1344,15 +1435,18 @@
     }).then(function (resp) {
       if (button) button.disabled = false;
       if (!resp || resp.err !== 'ok') {
+        updateIgnoredPickBar();       // 「撤销选中」按勾选数恢复可用性
         notify((resp && resp.msg) || t('ignore.undoFailed', '撤销失败'), 'error');
         return;
       }
       notify(t('ignore.undone', '已撤销 {n} 对忽略')
         .replace('{n}', (resp.data || {}).removed || 0), 'success');
+      state.ignoredPicked = {};       // 撤销成功：勾选清空（含没轮到的分页）
       loadIgnored();
       loadGroups();          // 撤销之后被藏起来的组要回来
     }).catch(function () {
       if (button) button.disabled = false;
+      updateIgnoredPickBar();
       notify(t('ignore.undoFailed', '撤销失败'), 'error');
     });
   }

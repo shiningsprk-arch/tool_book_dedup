@@ -22,9 +22,9 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 
 ```bash
 # Windows
-certutil -hashfile book_dedup-0.1.10.zip SHA256
+certutil -hashfile book_dedup-0.1.11.zip SHA256
 # Linux / macOS
-sha256sum book_dedup-0.1.10.zip
+sha256sum book_dedup-0.1.11.zip
 ```
 
 sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
@@ -33,7 +33,7 @@ sha256 与 Release 说明里的一致即可。**从源码重打也能得到同�
 ```bash
 git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
 cd tool_book_dedup
-python scripts/build.py            # → dist/book_dedup-0.1.10.zip，并打印 sha256
+python scripts/build.py            # → dist/book_dedup-0.1.11.zip，并打印 sha256
 ```
 
 ## 怎么用
@@ -64,8 +64,9 @@ python scripts/build.py            # → dist/book_dedup-0.1.10.zip，并打印 
    删除那本书的哪些数据），确认后才真的删。删掉一本之后，该组剩下的书仍可继续合并。
 8. **不是重复 → 忽略**：误报（同系列不同书、出版社异版）就点「不是重复（忽略这组）」。
    这一组会立刻从列表里消失，**重新查重时也不再报出来**；页面底部的「已忽略」卡片列出
-   所有忽略过的配对，可以逐对撤销或全部撤销。**忽略不动书库、不删记录**，只是记一句
-   "以后别再报出来"。
+   所有忽略过的配对（**分页**，每页 50 对），可以逐对撤销、**勾选后「撤销选中」**，或
+   「全部撤销」——每行勾选框、「全选本页」与两个撤销键都在列表**最上方**。
+   **忽略不动书库、不删记录**，只是记一句 "以后别再报出来"。
 
 ## 忽略（不是重复）
 
@@ -205,7 +206,7 @@ python scripts/build.py            # → dist/book_dedup-0.1.10.zip，并打印 
 ## 开发
 
 ```bash
-# 单测（纯引擎 81 + 假宿主 86 + 前端契约 28 = 195 项；不需要 MyBooks / calibre）
+# 单测（纯引擎 81 + 假宿主 92 + 前端契约 29 = 202 项；不需要 MyBooks / calibre）
 python tests/test_dedup_core.py
 python tests/test_fake_host.py
 python tests/test_frontend_contract.py
@@ -240,7 +241,7 @@ python scripts/make_locales.py
 
 ```
 backend/
-  tool.py            BookDedupTool + 9 个 Handler（@js @is_admin）
+  tool.py            BookDedupTool + 12 个 Handler（@js @is_admin）
   driver.py          取数（分批读全库）、扫描编排、报告落盘、合并计划
   write_ops.py       两处写操作（合并 / 删除）的执行与记账、守门与已处理台账
   dedup/             ★ 纯函数引擎，零宿主依赖，全部可离线单测

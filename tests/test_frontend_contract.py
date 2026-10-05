@@ -285,16 +285,33 @@ class TestFrontendWiring(unittest.TestCase):
         """忽略（不是重复）：按钮 → 接口 → 已忽略卡片与撤销，一条线都不能断。"""
         self.assertIn('data-ignore="1"', self.js)
         self.assertIn("api('ignore'", self.js)
-        self.assertIn("api('ignored'", self.js)
+        self.assertIn("api('ignored?", self.js)          # 0.1.11 起带分页参数
         self.assertIn("api('unignore'", self.js)
         # 撤销按钮带着配对键回来（后端按配对删）
         self.assertIn('data-unignore="', self.js)
         self.assertIn('loadIgnored()', self.js)
         self.assertIn('renderIgnored()', self.js)
         # 卡片节点必须在 HTML 里（id 拼错会静默不显示）
-        for node_id in ('ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all'):
+        for node_id in ('ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
+                        'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
+                        'btn-ignored-next', 'btn-unignore-selected', 'ignored-pick-all',
+                        'ignored-picked-count'):
             self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
             self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
+
+    def test_ignored_bulk_selection_wiring(self):
+        """**0.1.11**：已忽略列表——逐条勾选 + 全选本页 + 撤销选中（复用 unignore 批量）。"""
+        self.assertIn('data-pick="', self.js)
+        self.assertIn('state.ignoredPicked', self.js)
+        self.assertIn('updateIgnoredPickBar', self.js)
+        self.assertIn('pickedIgnoredPairs', self.js)
+        self.assertIn('pickAllOnPage', self.js)
+        # 撤销选中与全部撤销共用一个 unignore()；成功后勾选清空
+        match = re.search(r'function unignore\(pairs, all\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIsNotNone(match, '找不到 unignore 的定义')
+        body = match.group(1)
+        self.assertIn("api('unignore'", body)
+        self.assertIn('state.ignoredPicked = {}', body)
 
     def test_ignore_is_reversible_so_no_confirm_dialog(self):
         """忽略可撤销 → 不该再套一层二次确认（防误点的代价已经很低）。"""

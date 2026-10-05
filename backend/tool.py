@@ -80,9 +80,9 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.10',
+            'revision': '0.1.11',
             'author': '黏菌',
-            'publish_date': '2026-10-04',
+            'publish_date': '2026-10-05',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
         }
 
@@ -811,14 +811,21 @@ class UnignoreHandler(BaseHandler):
 
 
 class IgnoredHandler(BaseHandler):
-    """GET /ignored —— 忽略名单（书名 + 配对），供界面列出与撤销。"""
+    """GET /ignored —— 忽略名单（书名 + 配对），供界面列出与撤销。支持分页。"""
 
     @js
     @is_admin
     async def get(self):
         tool = BookDedupTool()
+        rows = write_ops.ignored_rows(tool.shared_dir())
+        page = self.get_argument('page', '0')
+        size = self.get_argument('size', '50')
+        sliced, total = report_mod.paginate(rows, page=page, size=size)
         return {'err': 'ok', 'data': {
-            'ignored': write_ops.ignored_rows(tool.shared_dir())}}
+            'ignored': sliced,
+            'filtered_total': total,
+            'page': int(page) if str(page).isdigit() else 0,
+        }}
 
 
 class CancelHandler(BaseHandler):

@@ -13,7 +13,6 @@ LOCALES = os.path.join(HERE, '..', 'frontend', 'locales')
 
 ZH = {
     'app.title': '查重合并',
-    'app.footer': '查重实现参考了 BookOrbit（AGPL-3.0）的设计思路与媒体家族格式清单，其余为本仓独立实现，详见 NOTICE。',
 
     'scope.title': '查重范围',
     'scope.loading': '正在读取书库信息…',
@@ -102,6 +101,9 @@ ZH = {
     'ignore.item': '《{a}》 ↔ 《{b}》',
     'ignore.undo': '撤销',
     'ignore.undoAll': '全部撤销',
+    'ignore.pickAllPage': '全选本页',
+    'ignore.undoSelected': '撤销选中',
+    'ignore.pickedCount': '已选 {n} 对',
     'ignore.done': '已忽略《{titles}》：以后查重不再报出来（可在「已忽略」里撤销）',
     'ignore.undone': '已撤销 {n} 对忽略',
     'ignore.failed': '忽略失败',
@@ -194,7 +196,6 @@ ZH = {
 
 EN = {
     'app.title': 'Duplicate Finder',
-    'app.footer': "Implementation references BookOrbit (AGPL-3.0) for its design approach and media-family format lists; everything else is this repository's own work — see NOTICE.",
 
     'scope.title': 'Scope',
     'scope.loading': 'Reading library information…',
@@ -283,6 +284,9 @@ EN = {
     'ignore.item': '《{a}》 ↔ 《{b}》',
     'ignore.undo': 'Undo',
     'ignore.undoAll': 'Undo all',
+    'ignore.pickAllPage': 'Select page',
+    'ignore.undoSelected': 'Undo selected',
+    'ignore.pickedCount': '{n} selected',
     'ignore.done': 'Ignored 《{titles}》: no longer reported (undo under "Ignored")',
     'ignore.undone': 'Undid {n} ignored pair(s)',
     'ignore.failed': 'Could not ignore',
@@ -375,7 +379,6 @@ EN = {
 
 ZH_TW = {
     'app.title': '查重合併',
-    'app.footer': '查重實作參考了 BookOrbit（AGPL-3.0）的設計思路與媒體家族格式清單，其餘為本工具獨立實作，詳見 NOTICE。',
 
     'scope.title': '查重範圍',
     'scope.loading': '正在讀取書庫資訊…',
@@ -464,6 +467,9 @@ ZH_TW = {
     'ignore.item': '《{a}》 ↔ 《{b}》',
     'ignore.undo': '撤銷',
     'ignore.undoAll': '全部撤銷',
+    'ignore.pickAllPage': '全選本頁',
+    'ignore.undoSelected': '撤銷選取',
+    'ignore.pickedCount': '已選 {n} 對',
     'ignore.done': '已忽略《{titles}》：以後查重不再報出來（可在「已忽略」裡撤銷）',
     'ignore.undone': '已撤銷 {n} 對忽略',
     'ignore.failed': '忽略失敗',
