@@ -148,6 +148,7 @@
       'summary-card', 'summary', 'filter-confidence', 'filter-keyword',
       'list-meta', 'groups', 'pager', 'pager-label', 'btn-prev', 'btn-next',
       'groups-bar', 'groups-pick-all', 'groups-picked-count', 'btn-ignore-selected',
+      'groups-page-size',
       'empty-state', 'handled-card', 'handled-list', 'toasts',
       'ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
       'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
@@ -300,6 +301,11 @@
     el['btn-ignore-selected'].addEventListener('click', ignoreSelected);
     el['groups-pick-all'].addEventListener('change', function () {
       pickAllGroupsOnPage(this.checked);
+    });
+    el['groups-page-size'].addEventListener('change', function () {
+      state.pageSize = Number(this.value) || 50;   // 档位值由布局给定，后端再钳上限
+      state.page = 0;                              // 换档位后回到第一页
+      loadGroups();
     });
 
     loadScope();

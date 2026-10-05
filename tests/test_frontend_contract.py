@@ -299,7 +299,7 @@ class TestFrontendWiring(unittest.TestCase):
             self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
             self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
         # 每页档位（0.1.12）：选择器在 HTML 里，换档后回落第一页再重取
-        self.assertIn('ignore.perPage', self.html)
+        self.assertIn('page.perPage', self.html)
         self.assertIn('state.ignoredPage = 0;', self.js)
 
     def test_ignored_bulk_selection_wiring(self):
@@ -325,7 +325,7 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn('pickedGroupIds', self.js)
         self.assertIn('indexes: indexes', self.js)
         for node_id in ('groups-bar', 'groups-pick-all', 'groups-picked-count',
-                        'btn-ignore-selected'):
+                        'btn-ignore-selected', 'groups-page-size'):
             self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
             self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
         # 忽略选中：走 /ignore 的批量 indexes 分支，成功后清空勾选并联动两张单子

@@ -1570,6 +1570,10 @@ class TestHandlers(unittest.TestCase):
         self.assertEqual(data['groups'][0]['confidence'], 'strong')
         data = self.call(self.tool.GroupsHandler, args={'keyword': '三体'})['data']
         self.assertGreaterEqual(data['filtered_total'], 1)
+        # 界面每页档位到 10000（0.1.12）：整页一次拿全（钳制上限由 core 用例钉住）
+        data = self.call(self.tool.GroupsHandler,
+                         args={'page': '0', 'size': '10000'})['data']
+        self.assertEqual(len(data['groups']), data['filtered_total'])
 
     def test_group_handler_returns_members_and_diff(self):
         data = self.call(self.tool.GroupHandler, args={'index': '0'})['data']

@@ -67,6 +67,17 @@
         </label>
         <span class="bd-hint" id="groups-picked-count"></span>
         <span class="bd-bar-actions">
+          <label class="bd-perpage">
+            <span data-i18n="page.perPage">每页</span>
+            <select id="groups-page-size">
+              <option value="10">10</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+              <option value="10000">10000</option>
+            </select>
+          </label>
           <button id="btn-ignore-selected" class="bd-btn" disabled data-i18n="list.ignoreSelected">忽略选中</button>
         </span>
       </div>
@@ -100,7 +111,7 @@
         <span class="bd-hint" id="ignored-picked-count"></span>
         <span class="bd-bar-actions">
           <label class="bd-perpage">
-            <span data-i18n="ignore.perPage">每页</span>
+            <span data-i18n="page.perPage">每页</span>
             <select id="ignored-page-size">
               <option value="10">10</option>
               <option value="50" selected>50</option>
