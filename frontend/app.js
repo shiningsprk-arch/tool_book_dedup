@@ -152,7 +152,7 @@
       'ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
       'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
       'btn-ignored-next', 'btn-unignore-selected', 'ignored-pick-all',
-      'ignored-picked-count',
+      'ignored-picked-count', 'ignored-page-size',
     ].forEach(function (id) {
       el[id] = document.getElementById(id);
     });
@@ -291,6 +291,11 @@
     });
     el['ignored-pick-all'].addEventListener('change', function () {
       pickAllOnPage(this.checked);
+    });
+    el['ignored-page-size'].addEventListener('change', function () {
+      state.ignoredPageSize = Number(this.value) || 50;   // 档位值由布局给定，后端再钳上限
+      state.ignoredPage = 0;                              // 换档位后回到第一页
+      loadIgnored();
     });
     el['btn-ignore-selected'].addEventListener('click', ignoreSelected);
     el['groups-pick-all'].addEventListener('change', function () {

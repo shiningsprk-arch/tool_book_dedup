@@ -69,6 +69,7 @@
   "ignore.failed": "忽略失败",
   "ignore.hint": "这些配对以后查重不再报出来。撤销之后重新查重它们会再出现。",
   "ignore.item": "《{a}》 ↔ 《{b}》",
+  "ignore.perPage": "每页",
   "ignore.pickAllPage": "全选本页",
   "ignore.pickedCount": "已选 {n} 对",
   "ignore.title": "已忽略（不是重复）",

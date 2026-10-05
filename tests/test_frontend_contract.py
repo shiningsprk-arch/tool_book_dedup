@@ -295,9 +295,12 @@ class TestFrontendWiring(unittest.TestCase):
         for node_id in ('ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
                         'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
                         'btn-ignored-next', 'btn-unignore-selected', 'ignored-pick-all',
-                        'ignored-picked-count'):
+                        'ignored-picked-count', 'ignored-page-size'):
             self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
             self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
+        # 每页档位（0.1.12）：选择器在 HTML 里，换档后回落第一页再重取
+        self.assertIn('ignore.perPage', self.html)
+        self.assertIn('state.ignoredPage = 0;', self.js)
 
     def test_ignored_bulk_selection_wiring(self):
         """**0.1.11**：已忽略列表——逐条勾选 + 全选本页 + 撤销选中（复用 unignore 批量）。"""

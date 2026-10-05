@@ -806,6 +806,14 @@ class TestReport(unittest.TestCase):
         self.assertEqual(total, 120)
         page, _total = report.paginate(groups, page=99, size=50)
         self.assertEqual(page, [])
+        # 界面每页档位到 10000（0.1.12）：拿得满，但再大也钳在 MAX_PAGE_SIZE
+        many = list(range(20050))
+        page, _total = report.paginate(many, page=0, size=10000)
+        self.assertEqual(len(page), 10000)
+        page, _total = report.paginate(many, page=1, size=10000)
+        self.assertEqual(len(page), 10000)
+        page, _total = report.paginate(many, page=0, size=999999)
+        self.assertEqual(len(page), report.MAX_PAGE_SIZE)
 
     def test_member_shape_is_narrow(self):
         """报告里每条成员只带白名单字段——别把整份数据字典写进报告文件。"""

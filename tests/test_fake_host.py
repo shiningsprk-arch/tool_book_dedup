@@ -1646,6 +1646,10 @@ class TestHandlers(unittest.TestCase):
         keys = [(row['a'], row['b'])
                 for row in first['ignored'] + second['ignored']]
         self.assertEqual(sorted(keys), [(901, 902), (901, 903), (902, 903)])
+        # 界面每页档位到 10000（0.1.12）：整页一次拿全
+        whole = self.call(self.tool.IgnoredHandler,
+                          args={'page': '0', 'size': '10000'})['data']
+        self.assertEqual(len(whole['ignored']), 3)
 
     def test_unignore_handler_removes_multiple_pairs(self):
         """**0.1.11**：一次请求撤销多对（「撤销选中」走的就是这条批量路径）；

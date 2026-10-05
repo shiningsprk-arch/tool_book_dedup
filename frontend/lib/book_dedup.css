@@ -407,6 +407,13 @@
   font-size: 13px;
 }
 
+.bd-perpage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
 .bd-bar-actions {
   display: inline-flex;
   gap: 8px;

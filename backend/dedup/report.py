@@ -117,6 +117,11 @@ def build_report(records, pairs, groups, threshold, stats, scope_note=''):
     }
 
 
+# 分页单页最多几条：界面每页档位到 10000（10/50/100/500/1000/10000），
+# 再往上钳住——单页响应别被构造请求拖成整库导出
+MAX_PAGE_SIZE = 10000
+
+
 def paginate(groups, page=0, size=50):
     """分页，返回 (切片, 总组数)。"""
     try:
@@ -124,7 +129,7 @@ def paginate(groups, page=0, size=50):
     except (TypeError, ValueError):
         page = 0
     try:
-        size = min(500, max(1, int(size)))
+        size = min(MAX_PAGE_SIZE, max(1, int(size)))
     except (TypeError, ValueError):
         size = 50
     start = page * size

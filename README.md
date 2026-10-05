@@ -22,9 +22,9 @@ MyBooks 工具箱外置工具：找出书库里的重复书籍，逐组对照后
 
 ```bash
 # Windows
-certutil -hashfile book_dedup-0.1.11.zip SHA256
+certutil -hashfile book_dedup-0.1.12.zip SHA256
 # Linux / macOS
-sha256sum book_dedup-0.1.11.zip
+sha256sum book_dedup-0.1.12.zip
 ```
 
 sha256 与 Release 说明里的一致即可。**从源码重打也能得到同一份字节**（打出的包是
@@ -33,7 +33,7 @@ sha256 与 Release 说明里的一致即可。**从源码重打也能得到同�
 ```bash
 git clone https://github.com/shiningsprk-arch/tool_book_dedup.git
 cd tool_book_dedup
-python scripts/build.py            # → dist/book_dedup-0.1.11.zip，并打印 sha256
+python scripts/build.py            # → dist/book_dedup-0.1.12.zip，并打印 sha256
 ```
 
 ## 怎么用
@@ -66,7 +66,8 @@ python scripts/build.py            # → dist/book_dedup-0.1.11.zip，并打印 
    删除那本书的哪些数据），确认后才真的删。删掉一本之后，该组剩下的书仍可继续合并。
 8. **不是重复 → 忽略**：误报（同系列不同书、出版社异版）就点「不是重复（忽略这组）」。
    这一组会立刻从列表里消失，**重新查重时也不再报出来**；页面底部的「已忽略」卡片列出
-   所有忽略过的配对（**分页**，每页 50 对），可以逐对撤销、**勾选后「撤销选中」**，或
+   所有忽略过的配对（**分页**，每页条数可选 10/50/100/500/1000/10000，默认 50 对），
+   可以逐对撤销、**勾选后「撤销选中」**，或
    「全部撤销」——每行勾选框、「全选本页」与两个撤销键都在列表**最上方**。
    **忽略不动书库、不删记录**，只是记一句 "以后别再报出来"。
 

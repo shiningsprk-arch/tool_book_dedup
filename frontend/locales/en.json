@@ -69,6 +69,7 @@
   "ignore.failed": "Could not ignore",
   "ignore.hint": "These pairs will no longer be reported. Undo one and the next scan will show it again.",
   "ignore.item": "《{a}》 ↔ 《{b}》",
+  "ignore.perPage": "Per page",
   "ignore.pickAllPage": "Select page",
   "ignore.pickedCount": "{n} selected",
   "ignore.title": "Ignored (not duplicates)",
