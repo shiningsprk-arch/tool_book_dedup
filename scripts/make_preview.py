@@ -472,23 +472,43 @@ STUB_API = """/* 预览用的假后端：直接读 data.json 里那份**真报�
       } });
     }
     if (name === 'ignore') {
-      // 与 tool.IgnoreHandler 同守门：id 必须是**这一组的成员**
-      var pos = parseInt(params.index, 10);
-      var target = DATA.report.groups[pos];
-      if (!target) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
-      var ids = (target.members || []).map(function (m) { return m.id; });
-      if (ids.length < 2) return Promise.resolve({ err: 'params.invalid', msg: '至少要选两本' });
+      // 批量（0.1.11）：与 tool.IgnoreHandler 的 indexes 分支同口径——整组忽略、逐组记账、
+      // 失效序号计 skipped 不报错；单组路径的守门与形状保持原样（id 必须是这一组的成员）
+      var batch = !!params.indexes;
+      var positions = batch ? params.indexes : [parseInt(params.index, 10)];
+      if (!batch) {
+        var target = DATA.report.groups[positions[0]];
+        if (!target) return Promise.resolve({ err: 'group.not_found', msg: '找不到该分组' });
+        if ((target.members || []).length < 2) {
+          return Promise.resolve({ err: 'params.invalid', msg: '至少要选两本' });
+        }
+      }
       var stamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
       var added = 0;
-      pairsIn(ids).forEach(function (pair) {
-        if (ignoredKeys().indexOf(pair[0] + ',' + pair[1]) >= 0) return;
-        DATA.ignored.push([pair[0], pair[1], stamp]);
-        added += 1;
+      var groups = 0;
+      var skipped = 0;
+      positions.forEach(function (pos) {
+        var target = DATA.report.groups[parseInt(pos, 10)];
+        if (!target || (target.members || []).length < 2) {
+          if (batch) skipped += 1;
+          return;
+        }
+        groups += 1;
+        var ids = (target.members || []).map(function (m) { return m.id; });
+        pairsIn(ids).forEach(function (pair) {
+          if (ignoredKeys().indexOf(pair[0] + ',' + pair[1]) >= 0) return;
+          DATA.ignored.push([pair[0], pair[1], stamp]);
+          added += 1;
+        });
       });
+      if (!batch) {
+        return Promise.resolve({ err: 'ok', data: {
+          added: added,
+          titles: (DATA.report.groups[positions[0]].members || []).map(function (m) { return m.title; }),
+        } });
+      }
       return Promise.resolve({ err: 'ok', data: {
-        added: added,
-        titles: (target.members || []).map(function (m) { return m.title; }),
-      } });
+        added: added, groups: groups, skipped: skipped } });
     }
     if (name === 'unignore') {
       if (params.all) {

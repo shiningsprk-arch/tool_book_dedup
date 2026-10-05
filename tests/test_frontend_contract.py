@@ -313,6 +313,26 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn("api('unignore'", body)
         self.assertIn('state.ignoredPicked = {}', body)
 
+    def test_groups_bulk_selection_wiring(self):
+        """**0.1.11**：结果列表勾选——逐行勾选 + 全选本页 + 忽略选中（批次交 /ignore indexes）。"""
+        self.assertIn('data-rowpick="', self.js)
+        self.assertIn('state.pickedGroups', self.js)
+        self.assertIn('updateGroupsBar', self.js)
+        self.assertIn('pickAllGroupsOnPage', self.js)
+        self.assertIn('pickedGroupIds', self.js)
+        self.assertIn('indexes: indexes', self.js)
+        for node_id in ('groups-bar', 'groups-pick-all', 'groups-picked-count',
+                        'btn-ignore-selected'):
+            self.assertIn('id="%s"' % node_id, self.html, '缺少 #%s' % node_id)
+            self.assertIn("'%s'" % node_id, self.js, 'app.js 没缓存 #%s' % node_id)
+        # 忽略选中：走 /ignore 的批量 indexes 分支，成功后清空勾选并联动两张单子
+        match = re.search(r'function ignoreSelected\(\) \{(.*?)\n  \}', self.js, re.S)
+        self.assertIsNotNone(match, '找不到 ignoreSelected 的定义')
+        body = match.group(1)
+        self.assertIn("api('ignore'", body)
+        self.assertIn('state.pickedGroups = {}', body)
+        self.assertIn('loadIgnored()', body)
+
     def test_ignore_is_reversible_so_no_confirm_dialog(self):
         """忽略可撤销 → 不该再套一层二次确认（防误点的代价已经很低）。"""
         match = re.search(r'function ignoreGroup\(\) \{(.*?)\n  \}', self.js, re.S)
@@ -349,6 +369,8 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertIn('if (!signature', body)
         self.assertIn('state.groupCache = {}', body)
         self.assertIn('state.active = null', body)
+        # 结果列表的勾选（pickedGroups）也是按组序号存的，同样不许跨报告存活
+        self.assertIn('state.pickedGroups = {}', body)
         # 必须在 loadGroups 里真的被调用（定义了不调等于没修）
         groups_body = re.search(r'function loadGroups\(\) \{(.*?)\n  \}', self.js, re.S)
         self.assertIsNotNone(groups_body)

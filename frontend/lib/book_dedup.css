@@ -161,11 +161,26 @@
 
 .bd-group-open { border-color: var(--mb-color-primary); }
 
+/* 勾选框在行头按钮**外侧**（按钮里塞 input 既是不合法的嵌套交互元素，
+   点击也会冒泡成"展开这一行"）；按钮改 flex 撑满剩余宽度 */
+.bd-group-row {
+  display: flex;
+  align-items: center;
+}
+
+.bd-group-pick {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding-left: 12px;
+}
+
 .bd-group-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 10px 12px;
   background: none;
   border: 0;
@@ -376,8 +391,8 @@
 
 .bd-card-title .bd-hint { font-weight: 400; margin-left: 6px; }
 
-/* 已忽略列表的顶部工具条：全选本页 + 已选计数 + 撤销选中/全部撤销 */
-.bd-ignored-bar {
+/* 列表勾选工具条（结果列表 / 已忽略列表共用）：全选本页 + 已选计数 + 批量按钮 */
+.bd-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -392,7 +407,7 @@
   font-size: 13px;
 }
 
-.bd-ignored-bar-actions {
+.bd-bar-actions {
   display: inline-flex;
   gap: 8px;
   margin-left: auto;

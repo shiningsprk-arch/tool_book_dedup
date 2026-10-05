@@ -55,6 +55,9 @@ from .dedup import report as report_mod
 # 单次扫描最多覆盖的书本数（与 driver 的上限一致）
 MAX_BOOKS = driver.MAX_BOOKS
 
+# 批量忽略一次最多几组（与 report.paginate 的 size 上限同值；界面一页最多 50 组）
+MAX_BATCH_GROUPS = 500
+
 _STATUS_RUNNING = BackgroundTask.STATUS_RUNNING
 _STATUS_COMPLETED = BackgroundTask.STATUS_COMPLETED
 _STATUS_FAILED = BackgroundTask.STATUS_FAILED
@@ -724,7 +727,8 @@ def load_ignored_keys(tool):
 class IgnoreHandler(BaseHandler):
     """POST /ignore —— 记下"这一组不是重复"，下次查重不再报出来。
 
-    请求体：``{"index": 3, "task_id": 7, "ids": [12, 15]}``（`ids` 可省，默认整组）。
+    请求体：``{"index": 3, "task_id": 7, "ids": [12, 15]}``（`ids` 可省，默认整组）；
+    批量（结果列表勾选 → 「忽略选中」）：``{"indexes": [1, 2, 3]}``，整组忽略多个分组。
 
     守门与写操作同款：只收分组序号 + 成员 id，且**每个 id 都必须是这一组当前的成员**。
     这里不改书库，但一样不接受任意 id——否则一个构造出来的请求就能把任意两本书写进白名单，
@@ -740,6 +744,8 @@ class IgnoreHandler(BaseHandler):
         payload = _parse_body(self)
         if payload is None:
             return {'err': 'params.invalid', 'msg': _('请求体不是合法 JSON')}
+        if 'indexes' in payload:
+            return self._ignore_batch(payload)
         index_arg = payload.get('index')
         if index_arg is None:
             return {'err': 'params.invalid', 'msg': _('缺少 index 参数')}
@@ -781,6 +787,54 @@ class IgnoreHandler(BaseHandler):
             'pairs': [list(pair) for pair in ignore_mod.pairs_in(
                 [m.get('id') for m in chosen])],
         }}
+
+    def _ignore_batch(self, payload):
+        """批量整组忽略：`{"indexes": [1, 2, 3]}`（界面「忽略选中」的落点）。
+
+        只按序号整组忽略，不接受 `ids` 子集——勾选的是"这几组不是重复"。
+        **必须逐组调 `add_ignored`**：把多组拼成一份 members 会按两两组合生成
+        根本没比对过、甚至跨组的配对，等于往白名单里塞私货。
+
+        已经不在结果里的序号计入 `skipped` 继续跑，不整体报错——与 `/unignore`
+        对不存在配对的口径一致：批量操作不该被一条失效数据拖垮。
+        """
+        if payload.get('ids') not in (None, '', []):
+            return {'err': 'params.invalid', 'msg': _('批量忽略不支持 ids，请整组提交')}
+        raw = payload.get('indexes')
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return {'err': 'params.invalid', 'msg': _('indexes 必须是非空整数数组')}
+        if len(raw) > MAX_BATCH_GROUPS:
+            return {'err': 'limit.exceeded',
+                    'msg': _('一次最多忽略 %d 组') % MAX_BATCH_GROUPS}
+        positions = []
+        seen = set()
+        for item in raw:
+            # bool 是 int 的子类：`[true]` 不能当成 1 号组（与 /start 同口径）
+            if isinstance(item, bool) or not isinstance(item, int):
+                return {'err': 'params.invalid', 'msg': _('indexes 必须是整数数组')}
+            if item not in seen:
+                seen.add(item)
+                positions.append(item)
+
+        tool = BookDedupTool()
+        work_dir, _resolved = _report_dir_for(tool, payload.get('task_id'))
+        if not work_dir:
+            return {'err': 'report.not_found', 'msg': _('没有可读取的查重结果')}
+
+        added = 0
+        groups = 0
+        skipped = 0
+        for position in positions:
+            members, error = write_ops.group_members(work_dir, position)
+            if error or len(members) < 2:
+                skipped += 1
+                continue
+            added += write_ops.add_ignored(tool.shared_dir(), members)
+            groups += 1
+        logging.info('[book_dedup] ignored %d group(s) in one request (skipped %d)',
+                     groups, skipped)
+        return {'err': 'ok', 'data': {
+            'added': added, 'groups': groups, 'skipped': skipped}}
 
 
 class UnignoreHandler(BaseHandler):

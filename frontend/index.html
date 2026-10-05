@@ -60,6 +60,16 @@
         </label>
       </div>
       <p class="bd-hint" id="list-meta"></p>
+      <div class="bd-bar" id="groups-bar">
+        <label class="bd-pick-all">
+          <input type="checkbox" id="groups-pick-all">
+          <span data-i18n="list.pickAllPage">全选本页</span>
+        </label>
+        <span class="bd-hint" id="groups-picked-count"></span>
+        <span class="bd-bar-actions">
+          <button id="btn-ignore-selected" class="bd-btn" disabled data-i18n="list.ignoreSelected">忽略选中</button>
+        </span>
+      </div>
       <div id="groups" class="bd-groups"></div>
       <div class="bd-pager" id="pager" hidden>
         <button id="btn-prev" class="bd-btn" data-i18n="pager.prev">上一页</button>
@@ -82,13 +92,13 @@
       <p class="bd-hint" data-i18n="ignore.hint">
         这些配对以后查重不再报出来。撤销之后重新查重它们会再出现。
       </p>
-      <div class="bd-ignored-bar">
+      <div class="bd-bar">
         <label class="bd-pick-all">
           <input type="checkbox" id="ignored-pick-all">
           <span data-i18n="ignore.pickAllPage">全选本页</span>
         </label>
         <span class="bd-hint" id="ignored-picked-count"></span>
-        <span class="bd-ignored-bar-actions">
+        <span class="bd-bar-actions">
           <button id="btn-unignore-selected" class="bd-btn" disabled data-i18n="ignore.undoSelected">撤销选中</button>
           <button id="btn-unignore-all" class="bd-btn" data-i18n="ignore.undoAll">全部撤销</button>
         </span>

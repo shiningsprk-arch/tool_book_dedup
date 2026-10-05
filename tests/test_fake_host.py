@@ -1657,6 +1657,49 @@ class TestHandlers(unittest.TestCase):
         listed = self.call(self.tool.IgnoredHandler)['data']['ignored']
         self.assertEqual([(row['a'], row['b']) for row in listed], [(902, 903)])
 
+    def test_ignore_batch_ignores_selected_groups(self):
+        """**批量忽略**：一次请求整组忽略多组（结果列表勾选 → 「忽略选中」的路径）。"""
+        positions = [row['index'] for row in
+                     self.call(self.tool.GroupsHandler)['data']['groups']]
+        chosen = positions[:2]
+        result = self.call(self.tool.IgnoreHandler, body={'indexes': chosen})
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['groups'], 2)
+        self.assertEqual(result['data']['skipped'], 0)
+        self.assertGreaterEqual(result['data']['added'], 2)      # 每组至少一对
+
+        # 两组都从结果列表消失，名单条数与新增配对数一致
+        left = [row['index'] for row in
+                self.call(self.tool.GroupsHandler)['data']['groups']]
+        for position in chosen:
+            self.assertNotIn(position, left)
+        listed = self.call(self.tool.IgnoredHandler)['data']
+        self.assertEqual(listed['filtered_total'], result['data']['added'])
+
+    def test_ignore_batch_skips_stale_index(self):
+        """失效序号（组已不在结果里）只计入 skipped，不拖垮整批。"""
+        first = self.call(self.tool.GroupsHandler)['data']['groups'][0]['index']
+        result = self.call(self.tool.IgnoreHandler, body={'indexes': [first, 9999]})
+        self.assertEqual(result['err'], 'ok')
+        self.assertEqual(result['data']['groups'], 1)
+        self.assertEqual(result['data']['skipped'], 1)
+
+    def test_ignore_batch_rejects_bad_indexes(self):
+        """indexes 必须是非空整数数组；带 ids 的批量请求明确拒绝（不静默忽略子集）。"""
+        for bad in ({'indexes': []}, {'indexes': 'abc'}, {'indexes': [True]},
+                    {'indexes': [1.5]}, {'indexes': [None]},
+                    {'indexes': [0], 'ids': [3, 4]}):
+            result = self.call(self.tool.IgnoreHandler, body=bad)
+            self.assertEqual(result['err'], 'params.invalid', bad)
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_ignore_batch_caps_group_count(self):
+        """一次最多 500 组（与分页 size 上限同值）——超了整体拒绝、不写名单。"""
+        result = self.call(self.tool.IgnoreHandler,
+                           body={'indexes': list(range(600))})
+        self.assertEqual(result['err'], 'limit.exceeded')
+        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
     def test_ignore_handler_rejects_foreign_ids(self):
         """白名单是"少报"：构造出来的请求不许把任意两本写进去。"""
         position = 0

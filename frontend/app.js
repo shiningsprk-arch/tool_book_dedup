@@ -131,6 +131,7 @@
     ignoredPage: 0,
     ignoredPageSize: 50,
     ignoredPicked: {},   // 已勾选的配对键 "a,b"（跨页保留，撤销成功后清空）
+    pickedGroups: {},    // 结果列表勾选的组序号（跨页保留；换报告时随 dropStaleResult 清空）
     active: null,        // 当前展开的分组 {index, group, keeperId, selected}
     groupCache: {},      // 组序号 → 详情（点过的行缓存下来，再点不请求）
     plan: null,          // 当前展开的合并预览（属于 active 那一组）
@@ -146,6 +147,7 @@
       'run-card', 'run-label', 'run-count', 'run-bar', 'run-detail',
       'summary-card', 'summary', 'filter-confidence', 'filter-keyword',
       'list-meta', 'groups', 'pager', 'pager-label', 'btn-prev', 'btn-next',
+      'groups-bar', 'groups-pick-all', 'groups-picked-count', 'btn-ignore-selected',
       'empty-state', 'handled-card', 'handled-list', 'toasts',
       'ignored-card', 'ignored-list', 'ignored-count', 'btn-unignore-all',
       'ignored-pager', 'ignored-pager-label', 'btn-ignored-prev',
@@ -289,6 +291,10 @@
     });
     el['ignored-pick-all'].addEventListener('change', function () {
       pickAllOnPage(this.checked);
+    });
+    el['btn-ignore-selected'].addEventListener('click', ignoreSelected);
+    el['groups-pick-all'].addEventListener('change', function () {
+      pickAllGroupsOnPage(this.checked);
     });
 
     loadScope();
@@ -504,6 +510,7 @@
     state.active = null;
     state.plan = null;
     state.confirmDelete = null;
+    state.pickedGroups = {};   // 勾的也是组序号，同样只对"这一份报告"有意义
     return true;
   }
 
@@ -528,6 +535,13 @@
       state.removedTitles = data.removed_titles || [];
       state.deletedTitles = data.deleted_titles || [];
       state.failedTitles = data.failed_titles || [];
+      // 批量忽略/合并之后列表会变短：页码越界就回夹到最后一页重取（与已忽略列表同口径）
+      var maxPage = Math.max(0, Math.ceil(state.filteredTotal / state.pageSize) - 1);
+      if (state.page > maxPage) {
+        state.page = maxPage;
+        loadGroups();
+        return;
+      }
       if (data.summary) renderSummary(data.summary);
       renderList(data);
       renderHandled();
@@ -566,6 +580,7 @@
 
     bindRows();
     bindDrawer();
+    updateGroupsBar();
   }
 
   function bindRows() {
@@ -574,26 +589,74 @@
         toggleRow(Number(node.getAttribute('data-open')));
       });
     });
+    el.groups.querySelectorAll('[data-rowpick]').forEach(function (node) {
+      node.addEventListener('change', function () {
+        var index = node.getAttribute('data-rowpick');
+        if (node.checked) state.pickedGroups[index] = true;
+        else delete state.pickedGroups[index];
+        updateGroupsBar();
+      });
+    });
+  }
+
+  /** 结果列表的勾选工具条：全选框的选中/半选、已选计数、「忽略选中」的可用性。 */
+  function updateGroupsBar() {
+    var rows = state.groups || [];
+    var onPage = rows.filter(function (group) {
+      return state.pickedGroups[group.index];
+    }).length;
+    el['groups-pick-all'].checked = rows.length > 0 && onPage === rows.length;
+    el['groups-pick-all'].indeterminate = onPage > 0 && onPage < rows.length;
+    var picked = Object.keys(state.pickedGroups).length;
+    el['groups-picked-count'].textContent = picked
+      ? t('list.pickedCount', '已选 {n} 组').replace('{n}', picked)
+      : '';
+    el['btn-ignore-selected'].disabled = picked === 0;
+  }
+
+  /** 已勾选的组序号（跨页合集）——「忽略选中」发这些。 */
+  function pickedGroupIds() {
+    return Object.keys(state.pickedGroups).map(Number);
+  }
+
+  /** 全选/全不选**当前分页**；其它页已勾的保持不动。就地点勾选，不整表重画（不丢滚动位）。 */
+  function pickAllGroupsOnPage(checked) {
+    (state.groups || []).forEach(function (group) {
+      if (checked) state.pickedGroups[group.index] = true;
+      else delete state.pickedGroups[group.index];
+    });
+    el.groups.querySelectorAll('[data-rowpick]').forEach(function (node) {
+      node.checked = !!state.pickedGroups[node.getAttribute('data-rowpick')];
+    });
+    updateGroupsBar();
   }
 
   function rowHtml(group, open) {
     return '<article class="bd-group' + (open ? ' bd-group-open' : '') +
         '" data-group="' + group.index + '">' +
-      '<button class="bd-group-head" data-open="' + group.index + '">' +
-        '<span class="bd-chip bd-chip-' + escapeHtml(group.confidence) + '">' +
-          escapeHtml(t(CONFIDENCE_KEYS[group.confidence], group.confidence)) + '</span>' +
-        (group.stale_count
-          ? '<span class="bd-chip bd-chip-stale">' +
-            escapeHtml(t('list.staleHandled', '已处理 {n} 本')
-              .replace('{n}', group.stale_count)) + '</span>'
-          : '') +
-        '<span class="bd-group-title">' + groupTitleHtml(group) + '</span>' +
-        '<span class="bd-group-meta">' +
-          escapeHtml(formatBytes(group.reclaimable_bytes)) + ' · ' +
-          escapeHtml(t('list.sameFormat', '同格式 {v}').replace('{v}', formatBytes(group.disk_waste_bytes))) +
-        '</span>' +
-        '<span class="bd-group-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span>' +
-      '</button>' +
+      '<div class="bd-group-row">' +
+        // 勾选框放**按钮外侧**：放进 data-open 按钮里既是不合法的嵌套交互元素，
+        // 点击还会冒泡到 bindRows 的展开处理
+        '<label class="bd-group-pick">' +
+          '<input type="checkbox" data-rowpick="' + group.index + '"' +
+            (state.pickedGroups[group.index] ? ' checked' : '') + '>' +
+        '</label>' +
+        '<button class="bd-group-head" data-open="' + group.index + '">' +
+          '<span class="bd-chip bd-chip-' + escapeHtml(group.confidence) + '">' +
+            escapeHtml(t(CONFIDENCE_KEYS[group.confidence], group.confidence)) + '</span>' +
+          (group.stale_count
+            ? '<span class="bd-chip bd-chip-stale">' +
+              escapeHtml(t('list.staleHandled', '已处理 {n} 本')
+                .replace('{n}', group.stale_count)) + '</span>'
+            : '') +
+          '<span class="bd-group-title">' + groupTitleHtml(group) + '</span>' +
+          '<span class="bd-group-meta">' +
+            escapeHtml(formatBytes(group.reclaimable_bytes)) + ' · ' +
+            escapeHtml(t('list.sameFormat', '同格式 {v}').replace('{v}', formatBytes(group.disk_waste_bytes))) +
+          '</span>' +
+          '<span class="bd-group-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span>' +
+        '</button>' +
+      '</div>' +
       (open ? drawerHtml(state.active, state.plan) : '') +
       '</article>';
   }
@@ -1320,6 +1383,34 @@
       loadIgnored();
     }).catch(function () {
       if (button) button.disabled = false;
+      notify(t('ignore.failed', '忽略失败'), 'error');
+    });
+  }
+
+  /** 结果列表勾选 → 「忽略选中」：一次请求整组忽略多个分组（服务端逐组记账）。 */
+  function ignoreSelected() {
+    var indexes = pickedGroupIds();
+    if (!indexes.length) return;
+    el['btn-ignore-selected'].disabled = true;
+    api('ignore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ indexes: indexes }),
+    }).then(function (resp) {
+      if (!resp || resp.err !== 'ok') {
+        updateGroupsBar();          // 按勾选数恢复按钮可用性
+        notify((resp && resp.msg) || t('ignore.failed', '忽略失败'), 'error');
+        return;
+      }
+      var data = resp.data || {};
+      notify(t('list.ignoreDone', '已忽略 {n} 组（{m} 对），可在下方「已忽略」里撤销')
+        .replace('{n}', data.groups || 0)
+        .replace('{m}', data.added || 0), 'success');
+      state.pickedGroups = {};
+      loadGroups();
+      loadIgnored();                // 两张单子联动：列表少了几组、下面多出配对
+    }).catch(function () {
+      updateGroupsBar();
       notify(t('ignore.failed', '忽略失败'), 'error');
     });
   }

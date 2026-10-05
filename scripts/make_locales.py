@@ -77,6 +77,10 @@ ZH = {
     'list.failed': '读取列表失败',
     'list.emptyClean': '没有发现重复书籍',
     'list.emptyFiltered': '当前筛选条件下没有结果',
+    'list.pickAllPage': '全选本页',
+    'list.pickedCount': '已选 {n} 组',
+    'list.ignoreSelected': '忽略选中',
+    'list.ignoreDone': '已忽略 {n} 组（{m} 对），可在下方「已忽略」里撤销',
 
     'pager.prev': '上一页',
     'pager.next': '下一页',
@@ -260,6 +264,10 @@ EN = {
     'list.failed': 'Could not read the list',
     'list.emptyClean': 'No duplicate books found',
     'list.emptyFiltered': 'No groups match the current filter',
+    'list.pickAllPage': 'Select page',
+    'list.pickedCount': '{n} group(s) selected',
+    'list.ignoreSelected': 'Ignore selected',
+    'list.ignoreDone': 'Ignored {n} group(s) ({m} pairs) — undo under "Ignored" below',
 
     'pager.prev': 'Previous',
     'pager.next': 'Next',
@@ -443,6 +451,10 @@ ZH_TW = {
     'list.failed': '讀取列表失敗',
     'list.emptyClean': '沒有發現重複書籍',
     'list.emptyFiltered': '目前篩選條件下沒有結果',
+    'list.pickAllPage': '全選本頁',
+    'list.pickedCount': '已選 {n} 組',
+    'list.ignoreSelected': '忽略選取',
+    'list.ignoreDone': '已忽略 {n} 組（{m} 對），可在下方「已忽略」裡撤銷',
 
     'pager.prev': '上一頁',
     'pager.next': '下一頁',
