@@ -1702,11 +1702,28 @@ class TestHandlers(unittest.TestCase):
         self.assertEqual(self.write_ops.read_ignored(self.shared), [])
 
     def test_ignore_batch_caps_group_count(self):
-        """一次最多 500 组（与分页 size 上限同值）——超了整体拒绝、不写名单。"""
-        result = self.call(self.tool.IgnoreHandler,
-                           body={'indexes': list(range(600))})
+        """**回归（0.1.12 错配）**：批量上限与分页单页上限同值（界面档位最大 10000）——
+        「全选本页 → 忽略选中」在大档位下必须可用；超上限仍整体拒绝、不写名单。"""
+        self.assertEqual(self.tool.MAX_BATCH_GROUPS, self.tool.report_mod.MAX_PAGE_SIZE)
+        # 边界值放行（上限拦在去重之前：重复项也计入条数，这里去重后只有 1 个真实序号）
+        allowed = self.call(self.tool.IgnoreHandler, body={'indexes': [0] * 10000})
+        self.assertEqual(allowed['err'], 'ok')
+        # 超一条即整体拒绝
+        result = self.call(self.tool.IgnoreHandler, body={'indexes': [0] * 10001})
         self.assertEqual(result['err'], 'limit.exceeded')
-        self.assertEqual(self.write_ops.read_ignored(self.shared), [])
+
+    def test_page_size_options_fit_the_batch_cap(self):
+        """**回归（0.1.12 错配）**：每页档位的最大值不许超过批量忽略上限——
+        否则「全选本页 → 忽略选中」在大档位下必被 limit 拒绝（守门正确但功能不可达）。"""
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 '..', 'frontend', 'index.html')
+        with _io.open(html_path, encoding='utf-8') as handle:
+            html = handle.read()
+        block = re.search(r'<select id="groups-page-size">(.*?)</select>', html, re.S)
+        self.assertIsNotNone(block, '找不到 #groups-page-size 的档位')
+        options = [int(value) for value in re.findall(r'value="(\d+)"', block.group(1))]
+        self.assertTrue(options)
+        self.assertLessEqual(max(options), self.tool.MAX_BATCH_GROUPS)
 
     def test_ignore_handler_rejects_foreign_ids(self):
         """白名单是"少报"：构造出来的请求不许把任意两本写进去。"""

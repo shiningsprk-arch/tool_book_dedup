@@ -55,8 +55,9 @@ from .dedup import report as report_mod
 # 单次扫描最多覆盖的书本数（与 driver 的上限一致）
 MAX_BOOKS = driver.MAX_BOOKS
 
-# 批量忽略一次最多几组（与 report.paginate 的 size 上限同值；界面一页最多 50 组）
-MAX_BATCH_GROUPS = 500
+# 批量忽略一次最多几组：**与分页单页上限同值**（界面每页档位最大就是它），
+# 这样「全选本页 → 忽略选中」在大档位下也必然可用；跨页累积超过它仍会被明确拒绝
+MAX_BATCH_GROUPS = report_mod.MAX_PAGE_SIZE
 
 _STATUS_RUNNING = BackgroundTask.STATUS_RUNNING
 _STATUS_COMPLETED = BackgroundTask.STATUS_COMPLETED
@@ -83,7 +84,7 @@ class BookDedupTool(BaseTool):
             'name': '查重合并',
             'description': '按 ISBN/标题/作者找出重复书籍，可逐组对照并合并：'
                            '格式并入保留项，重复记录删除。合并前会列出同名格式的取舍',
-            'revision': '0.1.12',
+            'revision': '0.1.13',
             'author': '黏菌',
             'publish_date': '2026-10-05',
             'repo_url': 'https://github.com/shiningsprk-arch/tool_book_dedup',
